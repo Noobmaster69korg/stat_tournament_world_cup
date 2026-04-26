@@ -9,7 +9,7 @@ st.set_page_config(page_title="World Cup Stats Tracker", layout="wide")
 
 st.title("🏏 World Cup Player Stats & Analytics")
 password = st.text_input("Enter Password to Access", type="password")
-if password != "your_secret_password":
+if password != "long live martell":
     st.error("Access Denied. Please enter the correct password.")
     st.stop() # This stops the rest of the code from running
 
