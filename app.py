@@ -64,7 +64,7 @@ nav_options = ["Batting Milestones", "Bowling Milestones", "📈 Player Analytic
 st.session_state.nav_choice = st.radio("Select Section:", nav_options, index=nav_options.index(st.session_state.nav_choice), horizontal=True)
 st.divider()
 
-# --- BATTING/BOWLING/ANALYTICS/DETAILS (Tabs 1-4 Logic) ---
+# --- TABS 1-4 (Original Functionality Restored) ---
 if st.session_state.nav_choice == "Batting Milestones":
     st.header("🏏 Batting Milestones")
     tr1a = st.number_input("Min Runs (A)", value=st.session_state.bat_runs_a)
@@ -171,14 +171,19 @@ elif st.session_state.nav_choice == "🏟️ Squad Comparison":
     st.divider()
 
     if st.session_state.squad_a and st.session_state.squad_b:
-        direction = st.radio("Comparison Direction:", ["Benchmark from Squad A vs Squad B", "Benchmark from Squad B vs Squad A"], horizontal=True)
+        # FIXED LOGIC: Explicitly identifying Source vs Target
+        comp_direction = st.radio("Comparison Direction:", ["Squad A is Benchmark", "Squad B is Benchmark"], horizontal=True)
         
-        # Determine source and target squads based on toggle
-        source_squad = st.session_state.squad_a if "A vs B" in direction else st.session_state.squad_b
-        target_squad = st.session_state.squad_b if "A vs B" in direction else st.session_state.squad_a
-        
-        # Bench Selection (Unique key ensures refresh on toggle)
-        comp_player = st.selectbox("Pick Benchmark Player:", source_squad, key=f"bench_player_{direction}")
+        if comp_direction == "Squad A is Benchmark":
+            source_squad = st.session_state.squad_a
+            target_squad = st.session_state.squad_b
+        else:
+            source_squad = st.session_state.squad_b
+            target_squad = st.session_state.squad_a
+            
+        # Use a combination key of direction and current squad to ensure dropdown refreshes
+        squad_key = "-".join(source_squad)
+        comp_player = st.selectbox("Pick Benchmark Player:", source_squad, key=f"bench_{comp_direction}_{squad_key}")
         
         if comp_player:
             b_years = pd.read_sql(f"SELECT Season FROM batting WHERE Player='{comp_player}'", conn)['Season'].tolist()
@@ -192,24 +197,28 @@ elif st.session_state.nav_choice == "🏟️ Squad Comparison":
                 table = "batting" if discipline == "Batting" else "bowling"
                 bench = pd.read_sql(f"SELECT * FROM {table} WHERE Player='{comp_player}' AND Season='{target_year}'", conn).iloc[0]
                 
-                # --- NEW: DISPLAY BENCHMARK STATS ---
-                st.success(f"**Benchmark Set:** {comp_player} ({target_year})")
-                b_cols = st.columns(3)
+                # --- STATS DISPLAY SECTION ---
+                st.info(f"📍 **Benchmark Details:** {comp_player} ({target_year})")
+                stat_cols = st.columns(3)
                 if discipline == "Batting":
                     tr, ta, ts = bench['Runs'], bench['Ave'], bench['SR']
-                    b_cols[0].metric("Runs", tr); b_cols[1].metric("Average", ta); b_cols[2].metric("Strike Rate", ts)
+                    stat_cols[0].metric("Runs", tr)
+                    stat_cols[1].metric("Average", ta)
+                    stat_cols[2].metric("Strike Rate", ts)
                 else:
                     tw, tav, te = bench['Wkts'], bench['Ave'], bench['Econ']
-                    b_cols[0].metric("Wickets", tw); b_cols[1].metric("Average", tav); b_cols[2].metric("Economy", te)
+                    stat_cols[0].metric("Wickets", tw)
+                    stat_cols[1].metric("Average", tav)
+                    stat_cols[2].metric("Economy", te)
                 
-                # Comparison Query
+                # Comparison Query Execution
                 target_str = "('" + "','".join(target_squad) + "')"
                 if discipline == "Batting":
                     q = f"SELECT Player, Season as Year, Runs, Ave as Average, SR as Strike_Rate, (CASE WHEN Runs > {tr} THEN 1 ELSE 0 END + CASE WHEN Ave > {ta} THEN 1 ELSE 0 END + CASE WHEN SR > {ts} THEN 1 ELSE 0 END) as WinsA, (CASE WHEN Runs = {tr} THEN 1 ELSE 0 END + CASE WHEN Ave = {ta} THEN 1 ELSE 0 END + CASE WHEN SR = {ts} THEN 1 ELSE 0 END) as TiesA, (CASE WHEN Runs < {tr} THEN 1 ELSE 0 END + CASE WHEN Ave < {ta} THEN 1 ELSE 0 END + CASE WHEN SR < {ts} THEN 1 ELSE 0 END) as LossesA FROM batting WHERE Player IN {target_str} ORDER BY WinsA DESC, Runs DESC"
                 else:
                     q = f"SELECT Player, Season as Year, Wkts as Wickets, Ave as Average, Econ as Economy, (CASE WHEN Wkts > {tw} THEN 1 ELSE 0 END + CASE WHEN Ave < {tav} THEN 1 ELSE 0 END + CASE WHEN Econ < {te} THEN 1 ELSE 0 END) as WinsA, (CASE WHEN Wkts = {tw} THEN 1 ELSE 0 END + CASE WHEN Ave = {tav} THEN 1 ELSE 0 END + CASE WHEN Econ = {te} THEN 1 ELSE 0 END) as TiesA, (CASE WHEN Wkts < {tw} THEN 1 ELSE 0 END + CASE WHEN Ave > {tav} THEN 1 ELSE 0 END + CASE WHEN Econ > {te} THEN 1 ELSE 0 END) as LossesA FROM bowling WHERE Player IN {target_str} ORDER BY WinsA DESC, Wickets DESC"
                 
-                display_styled_results(pd.read_sql(q, conn), f"Against {comp_player} ({target_year})")
+                display_styled_results(pd.read_sql(q, conn), f"Comparison against {comp_player}")
     else:
         st.info("Add players to both squads to begin.")
 
