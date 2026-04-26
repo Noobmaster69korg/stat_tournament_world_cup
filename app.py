@@ -8,6 +8,10 @@ conn = sqlite3.connect('cricket_stats.db')
 st.set_page_config(page_title="World Cup Stats Tracker", layout="wide")
 
 st.title("🏏 World Cup Player Stats & Analytics")
+password = st.text_input("Enter Password to Access", type="password")
+if password != "your_secret_password":
+    st.error("Access Denied. Please enter the correct password.")
+    st.stop() # This stops the rest of the code from running
 
 # --- GLOBAL HELPER FUNCTIONS (Defined at the top to prevent NameErrors) ---
 def fmt(count, total):
