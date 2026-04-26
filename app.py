@@ -10,6 +10,12 @@ st.set_page_config(page_title="World Cup Stats Tracker", layout="wide")
 st.title("🏏 World Cup Player Stats & Analytics")
 
 # --- SHARED HELPER FUNCTIONS ---
+def fmt(count, total):
+    """Formats count and percentage into a string: '10 (5.0%)'"""
+    if total <= 0: return "0 (0.0%)"
+    perc = (count * 100.0 / total)
+    return f"{int(count)} ({perc:.1f}%)"
+
 def get_profile_label(w, t, l):
     if w == 3: return "🏆 Beat all 3 categories"
     if w == 2 and t == 1: return "⭐ Beat 2 categories, Tied 1 category"
@@ -93,9 +99,7 @@ with tab3:
         df_p = pd.read_sql(p_q, conn)
         df_p['Total_Opp'] = df_p['Total_Raw'] - 1
         df_p['Tie_C'] = (df_p['Total_Raw'] - df_p['Win_C'] - df_p['Loss_C']) - 1
-        def fmt(count, total):
-            perc = (count * 100.0 / total) if total > 0 else 0
-            return f"{int(count)} ({perc:.1f}%)"
+        
         df_p['Wins (Percentile)'] = df_p.apply(lambda r: fmt(r['Win_C'], r['Total_Opp']), axis=1)
         df_p['Losses'] = df_p.apply(lambda r: fmt(r['Loss_C'], r['Total_Opp']), axis=1)
         df_p['Ties'] = df_p.apply(lambda r: fmt(r['Tie_C'], r['Total_Opp']), axis=1)
@@ -103,26 +107,17 @@ with tab3:
         f_view = ['Player', 'Season', 'Wins (Percentile)', 'Losses', 'Ties', 'Clean_Loss'] + (['Runs', 'Ave', 'SR'] if disc_p == "Batting" else ['Wkts', 'Ave', 'Econ'])
         st.dataframe(df_p.sort_values("sort_val", ascending=False)[f_view], use_container_width=True, hide_index=True)
 
-# --- TAB 4: PLAYER DETAILS (NEW) ---
+# --- TAB 4: PLAYER DETAILS ---
 with tab4:
     st.header("👤 Player Profile Search")
     st.write("Search for a player to see their full season-by-season global ranking details.")
     
-    # Get unique player names for the dropdown
     all_players = sorted(list(set(pd.read_sql("SELECT Player FROM batting", conn)['Player']) | set(pd.read_sql("SELECT Player FROM bowling", conn)['Player'])))
     target_player = st.selectbox("Select or Type Player Name", all_players)
 
     if target_player:
-        # 1. Batting Career
         st.subheader(f"🏏 Batting Career: {target_player}")
-        b_prof_q = f"""
-            SELECT A.Season, A.Runs, A.Ave, A.SR,
-            (SELECT COUNT(*) FROM batting) as Total_Raw,
-            (SELECT COUNT(*) FROM batting B WHERE ((CASE WHEN A.Runs > B.Runs THEN 1 ELSE 0 END) + (CASE WHEN A.Ave > B.Ave THEN 1 ELSE 0 END) + (CASE WHEN A.SR > B.SR THEN 1 ELSE 0 END)) >= 2) as Win_C,
-            (SELECT COUNT(*) FROM batting B WHERE ((CASE WHEN B.Runs > A.Runs THEN 1 ELSE 0 END) + (CASE WHEN B.Ave > A.Ave THEN 1 ELSE 0 END) + (CASE WHEN B.SR > A.SR THEN 1 ELSE 0 END)) >= 2) as Loss_C,
-            (SELECT COUNT(*) FROM batting B WHERE B.Runs > A.Runs AND B.Ave > A.Ave AND B.SR > A.SR) as Clean_Loss
-            FROM batting A WHERE A.Player = '{target_player}'
-        """
+        b_prof_q = f"SELECT A.Season, A.Runs, A.Ave, A.SR, (SELECT COUNT(*) FROM batting) as Total_Raw, (SELECT COUNT(*) FROM batting B WHERE ((CASE WHEN A.Runs > B.Runs THEN 1 ELSE 0 END) + (CASE WHEN A.Ave > B.Ave THEN 1 ELSE 0 END) + (CASE WHEN A.SR > B.SR THEN 1 ELSE 0 END)) >= 2) as Win_C, (SELECT COUNT(*) FROM batting B WHERE ((CASE WHEN B.Runs > A.Runs THEN 1 ELSE 0 END) + (CASE WHEN B.Ave > A.Ave THEN 1 ELSE 0 END) + (CASE WHEN B.SR > A.SR THEN 1 ELSE 0 END)) >= 2) as Loss_C, (SELECT COUNT(*) FROM batting B WHERE B.Runs > A.Runs AND B.Ave > A.Ave AND B.SR > A.SR) as Clean_Loss FROM batting A WHERE A.Player = '{target_player}'"
         df_b_prof = pd.read_sql(b_prof_q, conn)
         if not df_b_prof.empty:
             df_b_prof['Total_Opp'] = df_b_prof['Total_Raw'] - 1
@@ -131,19 +126,9 @@ with tab4:
             df_b_prof['Losses'] = df_b_prof.apply(lambda r: fmt(r['Loss_C'], r['Total_Opp']), axis=1)
             df_b_prof['Ties'] = df_b_prof.apply(lambda r: fmt(r['Tie_C'], r['Total_Opp']), axis=1)
             st.dataframe(df_b_prof[['Season', 'Runs', 'Ave', 'SR', 'Wins (Percentile)', 'Losses', 'Ties', 'Clean_Loss']], use_container_width=True, hide_index=True)
-        else:
-            st.info("No batting records found for this player.")
 
-        # 2. Bowling Career
         st.subheader(f"⚽ Bowling Career: {target_player}")
-        w_prof_q = f"""
-            SELECT A.Season, A.Wkts, A.Ave, A.Econ,
-            (SELECT COUNT(*) FROM bowling) as Total_Raw,
-            (SELECT COUNT(*) FROM bowling B WHERE ((CASE WHEN A.Wkts > B.Wkts THEN 1 ELSE 0 END) + (CASE WHEN A.Ave < B.Ave THEN 1 ELSE 0 END) + (CASE WHEN A.Econ < B.Econ THEN 1 ELSE 0 END)) >= 2) as Win_C,
-            (SELECT COUNT(*) FROM bowling B WHERE ((CASE WHEN B.Wkts > A.Wkts THEN 1 ELSE 0 END) + (CASE WHEN B.Ave < A.Ave THEN 1 ELSE 0 END) + (CASE WHEN B.Econ < A.Econ THEN 1 ELSE 0 END)) >= 2) as Loss_C,
-            (SELECT COUNT(*) FROM bowling B WHERE B.Wkts > A.Wkts AND B.Ave < A.Ave AND B.Econ < A.Econ) as Clean_Loss
-            FROM bowling A WHERE A.Player = '{target_player}'
-        """
+        w_prof_q = f"SELECT A.Season, A.Wkts, A.Ave, A.Econ, (SELECT COUNT(*) FROM bowling) as Total_Raw, (SELECT COUNT(*) FROM bowling B WHERE ((CASE WHEN A.Wkts > B.Wkts THEN 1 ELSE 0 END) + (CASE WHEN A.Ave < B.Ave THEN 1 ELSE 0 END) + (CASE WHEN A.Econ < B.Econ THEN 1 ELSE 0 END)) >= 2) as Win_C, (SELECT COUNT(*) FROM bowling B WHERE ((CASE WHEN B.Wkts > A.Wkts THEN 1 ELSE 0 END) + (CASE WHEN B.Ave < A.Ave THEN 1 ELSE 0 END) + (CASE WHEN B.Econ < A.Econ THEN 1 ELSE 0 END)) >= 2) as Loss_C, (SELECT COUNT(*) FROM bowling B WHERE B.Wkts > A.Wkts AND B.Ave < A.Ave AND B.Econ < A.Econ) as Clean_Loss FROM bowling A WHERE A.Player = '{target_player}'"
         df_w_prof = pd.read_sql(w_prof_q, conn)
         if not df_w_prof.empty:
             df_w_prof['Total_Opp'] = df_w_prof['Total_Raw'] - 1
@@ -152,7 +137,5 @@ with tab4:
             df_w_prof['Losses'] = df_w_prof.apply(lambda r: fmt(r['Loss_C'], r['Total_Opp']), axis=1)
             df_w_prof['Ties'] = df_w_prof.apply(lambda r: fmt(r['Tie_C'], r['Total_Opp']), axis=1)
             st.dataframe(df_w_prof[['Season', 'Wkts', 'Ave', 'Econ', 'Wins (Percentile)', 'Losses', 'Ties', 'Clean_Loss']], use_container_width=True, hide_index=True)
-        else:
-            st.info("No bowling records found for this player.")
 
 conn.close()
