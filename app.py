@@ -16,18 +16,16 @@ if password != "long live martell":
     st.stop()
 
 # --- INITIALIZE SESSION STATE ---
-# This keeps track of which "tab" we are on and the current benchmarks
 if "active_page" not in st.session_state:
     st.session_state.active_page = "Batting Milestones"
 
-# Store benchmarks in session state so they can be updated from Tab 4
-benchmark_defaults = {
-    "bat_r": 300, "bat_a": 40.0, "bat_s": 90.0,
-    "bowl_w": 15, "bowl_a": 25.0, "bowl_e": 5.0
-}
-for key, val in benchmark_defaults.items():
-    if key not in st.session_state:
-        st.session_state[key] = val
+# Store benchmarks in session state so they can be updated from Player Details
+if "bat_r" not in st.session_state: st.session_state.bat_r = 300
+if "bat_a" not in st.session_state: st.session_state.bat_a = 40.0
+if "bat_s" not in st.session_state: st.session_state.bat_s = 90.0
+if "bowl_w" not in st.session_state: st.session_state.bowl_w = 15
+if "bowl_a" not in st.session_state: st.session_state.bowl_a = 25.0
+if "bowl_e" not in st.session_state: st.session_state.bowl_e = 5.0
 
 # --- GLOBAL HELPER FUNCTIONS ---
 def fmt(count, total):
@@ -61,23 +59,21 @@ def display_styled_results(df, title_prefix):
         st.dataframe(sub_df, use_container_width=True, hide_index=True)
 
 # --- NAVIGATION ---
-# We use a radio styled as a horizontal bar to act as Tabs that we can control
 page_options = ["Batting Milestones", "Bowling Milestones", "📈 Player Analytics", "👤 Player Details"]
+# Sync the radio selection with the session state for auto-jumping
 st.session_state.active_page = st.radio("Navigate Sections:", page_options, index=page_options.index(st.session_state.active_page), horizontal=True)
-
 st.divider()
 
 # --- SECTION 1: BATTING ---
 if st.session_state.active_page == "Batting Milestones":
-    st.header("Batting Filter")
+    st.header("🏏 Batting Milestones")
     filter_mode_bat = st.radio("Display Mode:", ["Meet Set A Only", "Meet BOTH Set A and Set B"], horizontal=True)
     col_a, col_b = st.columns(2)
     with col_a:
         st.subheader("Set A (Primary)")
-        tr1a = st.number_input("Min Runs (A)", value=st.session_state.bat_r)
-        ta1a = st.number_input("Min Avg (A)", value=st.session_state.bat_a)
-        ts1a = st.number_input("Min SR (A)", value=st.session_state.bat_s)
-        # Update session state if user manually changes numbers
+        tr1a = st.number_input("Min Runs (A)", value=st.session_state.bat_r, key="inp_bat_r")
+        ta1a = st.number_input("Min Avg (A)", value=st.session_state.bat_a, key="inp_bat_a")
+        ts1a = st.number_input("Min SR (A)", value=st.session_state.bat_s, key="inp_bat_s")
         st.session_state.bat_r, st.session_state.bat_a, st.session_state.bat_s = tr1a, ta1a, ts1a
     with col_b:
         st.subheader("Set B (Secondary)")
@@ -88,14 +84,14 @@ if st.session_state.active_page == "Batting Milestones":
 
 # --- SECTION 2: BOWLING ---
 elif st.session_state.active_page == "Bowling Milestones":
-    st.header("Bowling Filter")
+    st.header("⚽ Bowling Milestones")
     filter_mode_bowl = st.radio("Display Mode:", ["Meet Set A Only", "Meet BOTH Set A and Set B"], horizontal=True)
     col_c, col_d = st.columns(2)
     with col_c:
         st.subheader("Set A (Primary)")
-        tw_a = st.number_input("Min Wickets (A)", value=st.session_state.bowl_w)
-        ta_a = st.number_input("Max Avg (A)", value=st.session_state.bowl_a)
-        te_a = st.number_input("Max Econ (A)", value=st.session_state.bowl_e)
+        tw_a = st.number_input("Min Wickets (A)", value=st.session_state.bowl_w, key="inp_bowl_w")
+        ta_a = st.number_input("Max Avg (A)", value=st.session_state.bowl_a, key="inp_bowl_a")
+        te_a = st.number_input("Max Econ (A)", value=st.session_state.bowl_e, key="inp_bowl_e")
         st.session_state.bowl_w, st.session_state.bowl_a, st.session_state.bowl_e = tw_a, ta_a, te_a
     with col_d:
         st.subheader("Set B (Secondary)")
@@ -107,7 +103,7 @@ elif st.session_state.active_page == "Bowling Milestones":
 # --- SECTION 3: ANALYTICS ---
 elif st.session_state.active_page == "📈 Player Analytics":
     st.header("📈 Advanced Analytics")
-    ana_choice = st.radio("Choose Analysis Type:", ["Career Consistency (Win %)", "Global Season Ranking (Pairwise Percentile)"], horizontal=True)
+    ana_choice = st.radio("Choose Analysis Type:", ["Career Consistency (Win %)", "Global Season Ranking (Pairwise)"], horizontal=True)
     if ana_choice == "Career Consistency (Win %)":
         disc_cons = st.radio("Discipline:", ["Batting", "Bowling"], horizontal=True, key="cons_disc")
         c1, c2, c3 = st.columns(3)
@@ -137,49 +133,38 @@ elif st.session_state.active_page == "📈 Player Analytics":
 # --- SECTION 4: PLAYER DETAILS ---
 elif st.session_state.active_page == "👤 Player Details":
     st.header("👤 Player Profile Search")
-    st.info("💡 **Feature:** Select a row in the tables below to automatically set those stats as benchmarks and jump to the Milestones tab.")
-    
-    p_b = pd.read_sql("SELECT DISTINCT Player FROM batting", conn)['Player'].tolist()
-    p_w = pd.read_sql("SELECT DISTINCT Player FROM bowling", conn)['Player'].tolist()
-    all_players = sorted(list(set(p_b + p_w)))
-    target_player = st.selectbox("Select Player Name", all_players)
+    st.info("💡 **Feature:** Select a row below to set those stats as benchmarks and jump to the Milestones tab.")
+    p_names = sorted(list(set(pd.read_sql("SELECT DISTINCT Player FROM batting", conn)['Player']) | set(pd.read_sql("SELECT DISTINCT Player FROM bowling", conn)['Player'])))
+    target_player = st.selectbox("Select Player Name", p_names)
 
     if target_player:
-        # Batting Section
+        # Batting
         st.subheader(f"🏏 Batting Career: {target_player}")
         b_q = f"SELECT A.Season, A.Runs, A.Ave, A.SR, (SELECT COUNT(*) FROM batting) as Total_Raw, (SELECT COUNT(*) FROM batting B WHERE ((CASE WHEN A.Runs > B.Runs THEN 1 ELSE 0 END) + (CASE WHEN A.Ave > B.Ave THEN 1 ELSE 0 END) + (CASE WHEN A.SR > B.SR THEN 1 ELSE 0 END)) >= 2) as Win_C, (SELECT COUNT(*) FROM batting B WHERE ((CASE WHEN B.Runs > A.Runs THEN 1 ELSE 0 END) + (CASE WHEN B.Ave > A.Ave THEN 1 ELSE 0 END) + (CASE WHEN B.SR > A.SR THEN 1 ELSE 0 END)) >= 2) as Loss_C FROM batting A WHERE A.Player = '{target_player}'"
         df_b = pd.read_sql(b_q, conn)
         if not df_b.empty:
             df_b['Total_Opp'] = df_b['Total_Raw'] - 1
             df_b['Wins (Percentile)'] = df_b.apply(lambda r: fmt(r['Win_C'], r['Total_Opp']), axis=1)
-            
-            # Interactive Table
-            event_b = st.dataframe(df_b[['Season', 'Runs', 'Ave', 'SR', 'Wins (Percentile)']], use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single_row", key="sel_bat")
-            
-            if event_b.selection.rows:
-                selected_data = df_b.iloc[event_b.selection.rows[0]]
-                st.session_state.bat_r = selected_data['Runs']
-                st.session_state.bat_a = selected_data['Ave']
-                st.session_state.bat_s = selected_data['SR']
+            # FIX: Used hyphen in selection_mode
+            evt_b = st.dataframe(df_b[['Season', 'Runs', 'Ave', 'SR', 'Wins (Percentile)']], use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row", key="sel_bat")
+            if evt_b.selection.rows:
+                sel = df_b.iloc[evt_b.selection.rows[0]]
+                st.session_state.bat_r, st.session_state.bat_a, st.session_state.bat_s = sel['Runs'], sel['Ave'], sel['SR']
                 st.session_state.active_page = "Batting Milestones"
                 st.rerun()
 
-        # Bowling Section
+        # Bowling
         st.subheader(f"⚽ Bowling Career: {target_player}")
         w_q = f"SELECT A.Season, A.Wkts, A.Ave, A.Econ, (SELECT COUNT(*) FROM bowling) as Total_Raw, (SELECT COUNT(*) FROM bowling B WHERE ((CASE WHEN A.Wkts > B.Wkts THEN 1 ELSE 0 END) + (CASE WHEN A.Ave < B.Ave THEN 1 ELSE 0 END) + (CASE WHEN A.Econ < B.Econ THEN 1 ELSE 0 END)) >= 2) as Win_C, (SELECT COUNT(*) FROM bowling B WHERE ((CASE WHEN B.Wkts > A.Wkts THEN 1 ELSE 0 END) + (CASE WHEN B.Ave < A.Ave THEN 1 ELSE 0 END) + (CASE WHEN B.Econ < A.Econ THEN 1 ELSE 0 END)) >= 2) as Loss_C FROM bowling A WHERE A.Player = '{target_player}'"
         df_w = pd.read_sql(w_q, conn)
         if not df_w.empty:
             df_w['Total_Opp'] = df_w['Total_Raw'] - 1
             df_w['Wins (Percentile)'] = df_w.apply(lambda r: fmt(r['Win_C'], r['Total_Opp']), axis=1)
-            
-            # Interactive Table
-            event_w = st.dataframe(df_w[['Season', 'Wkts', 'Ave', 'Econ', 'Wins (Percentile)']], use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single_row", key="sel_bowl")
-            
-            if event_w.selection.rows:
-                selected_data = df_w.iloc[event_w.selection.rows[0]]
-                st.session_state.bowl_w = selected_data['Wkts']
-                st.session_state.bowl_a = selected_data['Ave']
-                st.session_state.bowl_e = selected_data['Econ']
+            # FIX: Used hyphen in selection_mode
+            evt_w = st.dataframe(df_w[['Season', 'Wkts', 'Ave', 'Econ', 'Wins (Percentile)']], use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row", key="sel_bowl")
+            if evt_w.selection.rows:
+                sel = df_w.iloc[evt_w.selection.rows[0]]
+                st.session_state.bowl_w, st.session_state.bowl_a, st.session_state.bowl_e = sel['Wkts'], sel['Ave'], sel['Econ']
                 st.session_state.active_page = "Bowling Milestones"
                 st.rerun()
 
