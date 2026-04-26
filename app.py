@@ -13,7 +13,7 @@ if "authenticated" not in st.session_state:
 
 if not st.session_state.authenticated:
     pw = st.text_input("Enter Password to Access", type="password")
-    if pw == "your_secret_password": # Change this to your actual password
+    if pw == "long live martell": # Change this to your actual password
         st.session_state.authenticated = True
         st.rerun()
     else:
