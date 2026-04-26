@@ -8,14 +8,23 @@ conn = sqlite3.connect('cricket_stats.db')
 st.set_page_config(page_title="World Cup Stats Tracker", layout="wide")
 
 st.title("🏏 World Cup Player Stats & Analytics")
+
+# --- PASSWORD PROTECTION ---
 password = st.text_input("Enter Password to Access", type="password")
 if password != "long live martell":
     st.error("Access Denied. Please enter the correct password.")
-    st.stop() # This stops the rest of the code from running
+    st.stop()
 
-# --- GLOBAL HELPER FUNCTIONS (Defined at the top to prevent NameErrors) ---
+# --- INITIALIZE SESSION STATE FOR NAVIGATION AND BENCHMARKS ---
+if "nav_choice" not in st.session_state:
+    st.session_state.nav_choice = "Batting Milestones"
+
+# Helper to ensure benchmark values persist
+def get_val(key, default):
+    return st.session_state.get(key, default)
+
+# --- GLOBAL HELPER FUNCTIONS ---
 def fmt(count, total):
-    """Formats count and percentage into a string: '10 (5.0%)'"""
     if total <= 0: return "0 (0.0%)"
     perc = (count * 100.0 / total)
     return f"{int(count)} ({perc:.1f}%)"
@@ -49,17 +58,23 @@ def display_styled_results(df, title_prefix):
     with st.expander("View Full Combined List"):
         st.dataframe(df.drop(columns=['WinsA', 'TiesA', 'LossesA', 'WinsB', 'TiesB']), use_container_width=True)
 
-# --- MAIN TABS ---
-tab1, tab2, tab3, tab4 = st.tabs(["Batting Milestones", "Bowling Milestones", "📈 Player Analytics", "👤 Player Details"])
+# --- NAVIGATION MENU (Replaces Tabs to enable auto-jump) ---
+nav_options = ["Batting Milestones", "Bowling Milestones", "📈 Player Analytics", "👤 Player Details"]
+st.session_state.nav_choice = st.radio("Select Section:", nav_options, index=nav_options.index(st.session_state.nav_choice), horizontal=True)
+st.divider()
 
 # --- TAB 1: BATTING ---
-with tab1:
+if st.session_state.nav_choice == "Batting Milestones":
     st.header("Batting Filter")
     filter_mode_bat = st.radio("Display Mode:", ["Meet Set A Only", "Meet BOTH Set A and Set B"], horizontal=True, key="fmbat")
     col_a, col_b = st.columns(2)
     with col_a:
         st.subheader("Set A (Primary)")
-        tr1a, ta1a, ts1a = st.number_input("Min Runs (A)", value=300, key="bat_runs_a"), st.number_input("Min Avg (A)", value=40.0, key="bat_avg_a"), st.number_input("Min SR (A)", value=90.0, key="bat_sr_a")
+        tr1a = st.number_input("Min Runs (A)", value=get_val("bat_runs_a", 300), key="bat_runs_a")
+        ta1a = st.number_input("Min Avg (A)", value=get_val("bat_avg_a", 40.0), key="bat_avg_a")
+        ts1a = st.number_input("Min SR (A)", value=get_val("bat_sr_a", 90.0), key="bat_sr_a")
+        # Save back to state
+        st.session_state.bat_runs_a, st.session_state.bat_avg_a, st.session_state.bat_sr_a = tr1a, ta1a, ts1a
     with col_b:
         st.subheader("Set B (Secondary)")
         tr1b, ta1b, ts1b = st.number_input("Min Runs (B)", value=500, key="bat_runs_b"), st.number_input("Min Avg (B)", value=50.0, key="bat_avg_b"), st.number_input("Min SR (B)", value=100.0, key="bat_sr_b")
@@ -67,13 +82,16 @@ with tab1:
     display_styled_results(pd.read_sql(bat_query, conn), "Batting")
 
 # --- TAB 2: BOWLING ---
-with tab2:
+elif st.session_state.nav_choice == "Bowling Milestones":
     st.header("Bowling Filter")
     filter_mode_bowl = st.radio("Display Mode:", ["Meet Set A Only", "Meet BOTH Set A and Set B"], horizontal=True, key="fmbowl")
     col_c, col_d = st.columns(2)
     with col_c:
         st.subheader("Set A (Primary)")
-        tw_a, ta_a, te_a = st.number_input("Min Wickets (A)", 15, key="bowl_w_a"), st.number_input("Max Avg (A)", 25.0, key="bowl_a_a"), st.number_input("Max Econ (A)", 5.0, key="bowl_e_a")
+        tw_a = st.number_input("Min Wickets (A)", value=get_val("bowl_w_a", 15), key="bowl_w_a")
+        ta_a = st.number_input("Max Avg (A)", value=get_val("bowl_a_a", 25.0), key="bowl_a_a")
+        te_a = st.number_input("Max Econ (A)", value=get_val("bowl_e_a", 5.0), key="bowl_e_a")
+        st.session_state.bowl_w_a, st.session_state.bowl_a_a, st.session_state.bowl_e_a = tw_a, ta_a, te_a
     with col_d:
         st.subheader("Set B (Secondary)")
         tw_b, ta_b, te_b = st.number_input("Min Wickets (B)", 20, key="bowl_w_b"), st.number_input("Max Avg (B)", 20.0, key="bowl_a_b"), st.number_input("Max Econ (B)", 4.5, key="bowl_e_b")
@@ -81,7 +99,7 @@ with tab2:
     display_styled_results(pd.read_sql(bowl_query, conn), "Bowling")
 
 # --- TAB 3: ANALYTICS ---
-with tab3:
+elif st.session_state.nav_choice == "📈 Player Analytics":
     st.header("📈 Advanced Analytics")
     ana_choice = st.radio("Choose Analysis Type:", ["Career Consistency (Win %)", "Global Season Ranking (Pairwise Percentile)"], horizontal=True)
     if ana_choice == "Career Consistency (Win %)":
@@ -103,7 +121,6 @@ with tab3:
         df_p = pd.read_sql(p_q, conn)
         df_p['Total_Opp'] = df_p['Total_Raw'] - 1
         df_p['Tie_C'] = (df_p['Total_Raw'] - df_p['Win_C'] - df_p['Loss_C']) - 1
-        
         df_p['Wins (Percentile)'] = df_p.apply(lambda r: fmt(r['Win_C'], r['Total_Opp']), axis=1)
         df_p['Losses'] = df_p.apply(lambda r: fmt(r['Loss_C'], r['Total_Opp']), axis=1)
         df_p['Ties'] = df_p.apply(lambda r: fmt(r['Tie_C'], r['Total_Opp']), axis=1)
@@ -112,44 +129,42 @@ with tab3:
         st.dataframe(df_p.sort_values("sort_val", ascending=False)[f_view], use_container_width=True, hide_index=True)
 
 # --- TAB 4: PLAYER DETAILS ---
-with tab4:
+elif st.session_state.nav_choice == "👤 Player Details":
     st.header("👤 Player Profile Search")
-    st.write("Search for a player to see their full season-by-season global ranking details.")
+    st.info("💡 **Feature:** Click a row to set those stats as benchmarks and jump to Milestones.")
     
-    # Get all unique player names from both tables
     p_b = pd.read_sql("SELECT DISTINCT Player FROM batting", conn)['Player'].tolist()
     p_w = pd.read_sql("SELECT DISTINCT Player FROM bowling", conn)['Player'].tolist()
     all_players = sorted(list(set(p_b + p_w)))
-    
-    target_player = st.selectbox("Select or Type Player Name", all_players)
+    target_player = st.selectbox("Select Player Name", all_players)
 
     if target_player:
-        # Batting Section
         st.subheader(f"🏏 Batting Career: {target_player}")
-        b_prof_q = f"SELECT A.Season, A.Runs, A.Ave, A.SR, (SELECT COUNT(*) FROM batting) as Total_Raw, (SELECT COUNT(*) FROM batting B WHERE ((CASE WHEN A.Runs > B.Runs THEN 1 ELSE 0 END) + (CASE WHEN A.Ave > B.Ave THEN 1 ELSE 0 END) + (CASE WHEN A.SR > B.SR THEN 1 ELSE 0 END)) >= 2) as Win_C, (SELECT COUNT(*) FROM batting B WHERE ((CASE WHEN B.Runs > A.Runs THEN 1 ELSE 0 END) + (CASE WHEN B.Ave > A.Ave THEN 1 ELSE 0 END) + (CASE WHEN B.SR > A.SR THEN 1 ELSE 0 END)) >= 2) as Loss_C, (SELECT COUNT(*) FROM batting B WHERE B.Runs > A.Runs AND B.Ave > A.Ave AND B.SR > A.SR) as Clean_Loss FROM batting A WHERE A.Player = '{target_player}'"
+        b_prof_q = f"SELECT A.Season, A.Runs, A.Ave, A.SR, (SELECT COUNT(*) FROM batting) as Total_Raw, (SELECT COUNT(*) FROM batting B WHERE ((CASE WHEN A.Runs > B.Runs THEN 1 ELSE 0 END) + (CASE WHEN A.Ave > B.Ave THEN 1 ELSE 0 END) + (CASE WHEN A.SR > B.SR THEN 1 ELSE 0 END)) >= 2) as Win_C, (SELECT COUNT(*) FROM batting B WHERE ((CASE WHEN B.Runs > A.Runs THEN 1 ELSE 0 END) + (CASE WHEN B.Ave > A.Ave THEN 1 ELSE 0 END) + (CASE WHEN B.SR > A.SR THEN 1 ELSE 0 END)) >= 2) as Loss_C FROM batting A WHERE A.Player = '{target_player}'"
         df_b_prof = pd.read_sql(b_prof_q, conn)
         if not df_b_prof.empty:
             df_b_prof['Total_Opp'] = df_b_prof['Total_Raw'] - 1
-            df_b_prof['Tie_C'] = (df_b_prof['Total_Raw'] - df_b_prof['Win_C'] - df_b_prof['Loss_C']) - 1
             df_b_prof['Wins (Percentile)'] = df_b_prof.apply(lambda r: fmt(r['Win_C'], r['Total_Opp']), axis=1)
-            df_b_prof['Losses'] = df_b_prof.apply(lambda r: fmt(r['Loss_C'], r['Total_Opp']), axis=1)
-            df_b_prof['Ties'] = df_b_prof.apply(lambda r: fmt(r['Tie_C'], r['Total_Opp']), axis=1)
-            st.dataframe(df_b_prof[['Season', 'Runs', 'Ave', 'SR', 'Wins (Percentile)', 'Losses', 'Ties', 'Clean_Loss']], use_container_width=True, hide_index=True)
-        else:
-            st.info("No batting records found.")
+            # Interactive Table with Selection
+            event_b = st.dataframe(df_b_prof[['Season', 'Runs', 'Ave', 'SR', 'Wins (Percentile)']], use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row", key="sel_b")
+            if event_b.selection.rows:
+                sel = df_b_prof.iloc[event_b.selection.rows[0]]
+                st.session_state.bat_runs_a, st.session_state.bat_avg_a, st.session_state.bat_sr_a = sel['Runs'], sel['Ave'], sel['SR']
+                st.session_state.nav_choice = "Batting Milestones"
+                st.rerun()
 
-        # Bowling Section
         st.subheader(f"⚽ Bowling Career: {target_player}")
-        w_prof_q = f"SELECT A.Season, A.Wkts, A.Ave, A.Econ, (SELECT COUNT(*) FROM bowling) as Total_Raw, (SELECT COUNT(*) FROM bowling B WHERE ((CASE WHEN A.Wkts > B.Wkts THEN 1 ELSE 0 END) + (CASE WHEN A.Ave < B.Ave THEN 1 ELSE 0 END) + (CASE WHEN A.Econ < B.Econ THEN 1 ELSE 0 END)) >= 2) as Win_C, (SELECT COUNT(*) FROM bowling B WHERE ((CASE WHEN B.Wkts > A.Wkts THEN 1 ELSE 0 END) + (CASE WHEN B.Ave < A.Ave THEN 1 ELSE 0 END) + (CASE WHEN B.Econ < A.Econ THEN 1 ELSE 0 END)) >= 2) as Loss_C, (SELECT COUNT(*) FROM bowling B WHERE B.Wkts > A.Wkts AND B.Ave < A.Ave AND B.Econ < A.Econ) as Clean_Loss FROM bowling A WHERE A.Player = '{target_player}'"
+        w_prof_q = f"SELECT A.Season, A.Wkts, A.Ave, A.Econ, (SELECT COUNT(*) FROM bowling) as Total_Raw, (SELECT COUNT(*) FROM bowling B WHERE ((CASE WHEN A.Wkts > B.Wkts THEN 1 ELSE 0 END) + (CASE WHEN A.Ave < B.Ave THEN 1 ELSE 0 END) + (CASE WHEN A.Econ < B.Econ THEN 1 ELSE 0 END)) >= 2) as Win_C, (SELECT COUNT(*) FROM bowling B WHERE ((CASE WHEN B.Wkts > A.Wkts THEN 1 ELSE 0 END) + (CASE WHEN B.Ave < A.Ave THEN 1 ELSE 0 END) + (CASE WHEN B.Econ < A.Econ THEN 1 ELSE 0 END)) >= 2) as Loss_C FROM bowling A WHERE A.Player = '{target_player}'"
         df_w_prof = pd.read_sql(w_prof_q, conn)
         if not df_w_prof.empty:
             df_w_prof['Total_Opp'] = df_w_prof['Total_Raw'] - 1
-            df_w_prof['Tie_C'] = (df_w_prof['Total_Raw'] - df_w_prof['Win_C'] - df_w_prof['Loss_C']) - 1
             df_w_prof['Wins (Percentile)'] = df_w_prof.apply(lambda r: fmt(r['Win_C'], r['Total_Opp']), axis=1)
-            df_w_prof['Losses'] = df_w_prof.apply(lambda r: fmt(r['Loss_C'], r['Total_Opp']), axis=1)
-            df_w_prof['Ties'] = df_w_prof.apply(lambda r: fmt(r['Tie_C'], r['Total_Opp']), axis=1)
-            st.dataframe(df_w_prof[['Season', 'Wkts', 'Ave', 'Econ', 'Wins (Percentile)', 'Losses', 'Ties', 'Clean_Loss']], use_container_width=True, hide_index=True)
-        else:
-            st.info("No bowling records found.")
+            # Interactive Table with Selection
+            event_w = st.dataframe(df_w_prof[['Season', 'Wkts', 'Ave', 'Econ', 'Wins (Percentile)']], use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row", key="sel_w")
+            if event_w.selection.rows:
+                sel = df_w_prof.iloc[event_w.selection.rows[0]]
+                st.session_state.bowl_w_a, st.session_state.bowl_a_a, st.session_state.bowl_e_a = sel['Wkts'], sel['Ave'], sel['Econ']
+                st.session_state.nav_choice = "Bowling Milestones"
+                st.rerun()
 
 conn.close()
