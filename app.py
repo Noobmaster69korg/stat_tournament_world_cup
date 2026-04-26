@@ -79,9 +79,9 @@ if st.session_state.nav_choice == "Batting Milestones":
         st.session_state.bat_runs_a, st.session_state.bat_avg_a, st.session_state.bat_sr_a = tr1a, ta1a, ts1a
     with col_b:
         st.subheader("Set B (Secondary)")
-        tr1b = st.number_input("Min Runs (B)", value=500, key="br_b")
-        ta1b = st.number_input("Min Avg (B)", value=50.0, key="ba_b")
-        ts1b = st.number_input("Min SR (B)", value=100.0, key="bs_b")
+        tr1b = st.number_input("Min Runs (B)", value=75, key="br_b")
+        ta1b = st.number_input("Min Avg (B)", value=20, key="ba_b")
+        ts1b = st.number_input("Min SR (B)", value=50, key="bs_b")
 
     bat_query = f"""
     WITH Base AS (
