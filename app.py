@@ -79,9 +79,9 @@ if st.session_state.nav_choice == "Batting Milestones":
         st.session_state.bat_runs_a, st.session_state.bat_avg_a, st.session_state.bat_sr_a = tr1a, ta1a, ts1a
     with col_b:
         st.subheader("Set B (Secondary)")
-        tr1b = st.number_input("Min Runs (B)", value=75, key="br_b")
-        ta1b = st.number_input("Min Avg (B)", value=20, key="ba_b")
-        ts1b = st.number_input("Min SR (B)", value=50, key="bs_b")
+        tr1b = st.number_input("Min Runs (B)", value=500, key="br_b")
+        ta1b = st.number_input("Min Avg (B)", value=50, key="ba_b")
+        ts1b = st.number_input("Min SR (B)", value=110, key="bs_b")
 
     bat_query = f"""
     WITH Base AS (
@@ -140,10 +140,10 @@ elif st.session_state.nav_choice == "📈 Player Analytics":
         disc_cons = st.radio("Discipline:", ["Batting", "Bowling"], horizontal=True, key="dc_c")
         c1, c2, c3 = st.columns(3)
         if disc_cons == "Batting":
-            r_c, a_c, s_c = c1.number_input("Min Runs", 250), c2.number_input("Min Avg", 35.0), c3.number_input("Min SR", 85.0)
+            r_c, a_c, s_c = c1.number_input("Min Runs", 150), c2.number_input("Min Avg", 20), c3.number_input("Min SR", 55.0)
             q = f"SELECT Player, COUNT(*) as Total, SUM(CASE WHEN ((Runs >= {r_c}) + (Ave >= {a_c}) + (SR >= {s_c})) >= 2 THEN 1 ELSE 0 END) as Successful FROM batting GROUP BY Player HAVING Successful > 0"
         else:
-            w_c, av_c, e_c = c1.number_input("Min Wkts", 12), c2.number_input("Max Avg", 28.0), c3.number_input("Max Econ", 5.5)
+            w_c, av_c, e_c = c1.number_input("Min Wkts", 7), c2.number_input("Max Avg", 2), c3.number_input("Max Econ", 1.0)
             q = f"SELECT Player, COUNT(*) as Total, SUM(CASE WHEN ((Wkts >= {w_c}) + (Ave <= {av_c}) + (Econ <= {e_c})) >= 2 THEN 1 ELSE 0 END) as Successful FROM bowling GROUP BY Player HAVING Successful > 0"
         df_c = pd.read_sql(q, conn)
         df_c['Win %'] = (df_c['Successful'] * 100.0 / df_c['Total']).round(2)
