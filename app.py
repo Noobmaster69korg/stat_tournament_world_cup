@@ -9,7 +9,7 @@ st.set_page_config(page_title="World Cup Stats Tracker", layout="wide")
 
 st.title("🏏 World Cup Player Stats & Analytics")
 
-# --- SHARED HELPER FUNCTIONS ---
+# --- GLOBAL HELPER FUNCTIONS (Defined at the top to prevent NameErrors) ---
 def fmt(count, total):
     """Formats count and percentage into a string: '10 (5.0%)'"""
     if total <= 0: return "0 (0.0%)"
@@ -112,10 +112,15 @@ with tab4:
     st.header("👤 Player Profile Search")
     st.write("Search for a player to see their full season-by-season global ranking details.")
     
-    all_players = sorted(list(set(pd.read_sql("SELECT Player FROM batting", conn)['Player']) | set(pd.read_sql("SELECT Player FROM bowling", conn)['Player'])))
+    # Get all unique player names from both tables
+    p_b = pd.read_sql("SELECT DISTINCT Player FROM batting", conn)['Player'].tolist()
+    p_w = pd.read_sql("SELECT DISTINCT Player FROM bowling", conn)['Player'].tolist()
+    all_players = sorted(list(set(p_b + p_w)))
+    
     target_player = st.selectbox("Select or Type Player Name", all_players)
 
     if target_player:
+        # Batting Section
         st.subheader(f"🏏 Batting Career: {target_player}")
         b_prof_q = f"SELECT A.Season, A.Runs, A.Ave, A.SR, (SELECT COUNT(*) FROM batting) as Total_Raw, (SELECT COUNT(*) FROM batting B WHERE ((CASE WHEN A.Runs > B.Runs THEN 1 ELSE 0 END) + (CASE WHEN A.Ave > B.Ave THEN 1 ELSE 0 END) + (CASE WHEN A.SR > B.SR THEN 1 ELSE 0 END)) >= 2) as Win_C, (SELECT COUNT(*) FROM batting B WHERE ((CASE WHEN B.Runs > A.Runs THEN 1 ELSE 0 END) + (CASE WHEN B.Ave > A.Ave THEN 1 ELSE 0 END) + (CASE WHEN B.SR > A.SR THEN 1 ELSE 0 END)) >= 2) as Loss_C, (SELECT COUNT(*) FROM batting B WHERE B.Runs > A.Runs AND B.Ave > A.Ave AND B.SR > A.SR) as Clean_Loss FROM batting A WHERE A.Player = '{target_player}'"
         df_b_prof = pd.read_sql(b_prof_q, conn)
@@ -126,7 +131,10 @@ with tab4:
             df_b_prof['Losses'] = df_b_prof.apply(lambda r: fmt(r['Loss_C'], r['Total_Opp']), axis=1)
             df_b_prof['Ties'] = df_b_prof.apply(lambda r: fmt(r['Tie_C'], r['Total_Opp']), axis=1)
             st.dataframe(df_b_prof[['Season', 'Runs', 'Ave', 'SR', 'Wins (Percentile)', 'Losses', 'Ties', 'Clean_Loss']], use_container_width=True, hide_index=True)
+        else:
+            st.info("No batting records found.")
 
+        # Bowling Section
         st.subheader(f"⚽ Bowling Career: {target_player}")
         w_prof_q = f"SELECT A.Season, A.Wkts, A.Ave, A.Econ, (SELECT COUNT(*) FROM bowling) as Total_Raw, (SELECT COUNT(*) FROM bowling B WHERE ((CASE WHEN A.Wkts > B.Wkts THEN 1 ELSE 0 END) + (CASE WHEN A.Ave < B.Ave THEN 1 ELSE 0 END) + (CASE WHEN A.Econ < B.Econ THEN 1 ELSE 0 END)) >= 2) as Win_C, (SELECT COUNT(*) FROM bowling B WHERE ((CASE WHEN B.Wkts > A.Wkts THEN 1 ELSE 0 END) + (CASE WHEN B.Ave < A.Ave THEN 1 ELSE 0 END) + (CASE WHEN B.Econ < A.Econ THEN 1 ELSE 0 END)) >= 2) as Loss_C, (SELECT COUNT(*) FROM bowling B WHERE B.Wkts > A.Wkts AND B.Ave < A.Ave AND B.Econ < A.Econ) as Clean_Loss FROM bowling A WHERE A.Player = '{target_player}'"
         df_w_prof = pd.read_sql(w_prof_q, conn)
@@ -137,5 +145,7 @@ with tab4:
             df_w_prof['Losses'] = df_w_prof.apply(lambda r: fmt(r['Loss_C'], r['Total_Opp']), axis=1)
             df_w_prof['Ties'] = df_w_prof.apply(lambda r: fmt(r['Tie_C'], r['Total_Opp']), axis=1)
             st.dataframe(df_w_prof[['Season', 'Wkts', 'Ave', 'Econ', 'Wins (Percentile)', 'Losses', 'Ties', 'Clean_Loss']], use_container_width=True, hide_index=True)
+        else:
+            st.info("No bowling records found.")
 
 conn.close()
