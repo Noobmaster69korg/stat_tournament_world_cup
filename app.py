@@ -182,7 +182,6 @@ elif st.session_state.nav_choice == "🏟️ Squad Comparison":
                 
                 if y:
                     bench = pd.read_sql(f"SELECT * FROM {'batting' if disc == 'Batting' else 'bowling'} WHERE Player='{p}' AND Season='{y}'", conn).iloc[0]
-                    # RE-ADDED: DISPLAY STATS
                     st.info(f"📍 **Benchmark Stats:** {p} ({y})")
                     met1, met2, met3 = st.columns(3)
                     if disc == "Batting":
@@ -196,7 +195,7 @@ elif st.session_state.nav_choice == "🏟️ Squad Comparison":
                     display_styled_results(pd.read_sql(q, conn), f"Against {p}")
         
         else:
-            # NEW: SQUAD PAIRWISE STANDINGS
+            # SQUAD PAIRWISE STANDINGS (WITH WINS, LOSSES AND TIES COLUMNS)
             disc = st.radio("Choose Discipline to Rank:", ["Batting", "Bowling"], horizontal=True)
             t = disc.lower()
             a_list = "('" + "','".join(st.session_state.squad_a) + "')"
@@ -209,20 +208,28 @@ elif st.session_state.nav_choice == "🏟️ Squad Comparison":
             col_a, col_b = st.columns(2)
             
             with col_a:
-                st.markdown("### Squad A Performance")
+                st.markdown("### Squad A Performance against B")
                 q_a = f"SELECT A.Player, A.Season, (SELECT COUNT(*) FROM {t} B WHERE B.Player IN {b_list}) as TR, (SELECT COUNT(*) FROM {t} B WHERE B.Player IN {b_list} AND {win} >= 2) as WC, (SELECT COUNT(*) FROM {t} B WHERE B.Player IN {b_list} AND {loss} >= 2) as LC FROM {t} A WHERE A.Player IN {a_list}"
                 df_a = pd.read_sql(q_a, conn)
                 if not df_a.empty:
-                    df_a['Wins vs B %'] = df_a.apply(lambda r: fmt(r['WC'], r['TR']), axis=1)
-                    st.dataframe(df_a.sort_values("WC", ascending=False)[['Player', 'Season', 'Wins vs B %']], use_container_width=True, hide_index=True)
+                    df_a['Ties_C'] = df_a['TR'] - df_a['WC'] - df_a['LC']
+                    df_a['Wins'] = df_a.apply(lambda r: fmt(r['WC'], r['TR']), axis=1)
+                    df_a['Losses'] = df_a.apply(lambda r: fmt(r['LC'], r['TR']), axis=1)
+                    df_a['Ties'] = df_a.apply(lambda r: fmt(r['Ties_C'], r['TR']), axis=1)
+                    
+                    st.dataframe(df_a.sort_values("WC", ascending=False)[['Player', 'Season', 'Wins', 'Losses', 'Ties']], use_container_width=True, hide_index=True)
             
             with col_b:
-                st.markdown("### Squad B Performance")
+                st.markdown("### Squad B Performance against A")
                 q_b = f"SELECT A.Player, A.Season, (SELECT COUNT(*) FROM {t} B WHERE B.Player IN {a_list}) as TR, (SELECT COUNT(*) FROM {t} B WHERE B.Player IN {a_list} AND {win} >= 2) as WC, (SELECT COUNT(*) FROM {t} B WHERE B.Player IN {a_list} AND {loss} >= 2) as LC FROM {t} A WHERE A.Player IN {b_list}"
                 df_b = pd.read_sql(q_b, conn)
                 if not df_b.empty:
-                    df_b['Wins vs A %'] = df_b.apply(lambda r: fmt(r['WC'], r['TR']), axis=1)
-                    st.dataframe(df_b.sort_values("WC", ascending=False)[['Player', 'Season', 'Wins vs A %']], use_container_width=True, hide_index=True)
+                    df_b['Ties_C'] = df_b['TR'] - df_b['WC'] - df_b['LC']
+                    df_b['Wins'] = df_b.apply(lambda r: fmt(r['WC'], r['TR']), axis=1)
+                    df_b['Losses'] = df_b.apply(lambda r: fmt(r['LC'], r['TR']), axis=1)
+                    df_b['Ties'] = df_b.apply(lambda r: fmt(r['Ties_C'], r['TR']), axis=1)
+                    
+                    st.dataframe(df_b.sort_values("WC", ascending=False)[['Player', 'Season', 'Wins', 'Losses', 'Ties']], use_container_width=True, hide_index=True)
     else:
         st.info("Add players to both squads to begin.")
 
