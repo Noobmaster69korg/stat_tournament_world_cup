@@ -5,39 +5,41 @@ import json
 import requests
 from itertools import combinations
 
-# --- 1. SCRAPER LOGIC (Fixed to use correct parser) ---
+# --- 1. SCRAPER LOGIC (Resilient Version) ---
 def scrape_cricinfo(url, discipline):
     try:
-        # Use a header to pretend we are a browser
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
-        response = requests.get(url, headers=headers)
+        response = requests.get(url, headers=headers, timeout=10)
         
-        # We specify 'lxml' as the parser here
-        tables = pd.read_html(response.text, flavor='lxml')
+        # Try different parsers to avoid 'lxml' dependency errors
+        try:
+            tables = pd.read_html(response.text, flavor='lxml')
+        except:
+            try:
+                tables = pd.read_html(response.text, flavor='html5lib')
+            except:
+                tables = pd.read_html(response.text) # Default
         
         df = None
         for t in tables:
-            # Flatten multi-index columns if they exist
             if isinstance(t.columns, pd.MultiIndex):
                 t.columns = t.columns.get_level_values(-1)
-            
             if 'Player' in t.columns:
                 df = t
                 break
         
         if df is None: return None
         
-        # Standardize Columns
+        # Clean Player Names (remove * and †)
+        df['Player'] = df['Player'].str.replace(r'[^\w\s]', '', regex=True).str.strip()
+
         if discipline == "batting":
             df = df.rename(columns={'Span': 'Season', 'SR': 'SR', 'Ave': 'Ave', 'Runs': 'Runs'})
-            # Clean names (remove icons like * or †)
-            df['Player'] = df['Player'].str.replace(r'[^\w\s]', '', regex=True).str.strip()
             for col in ['Runs', 'Ave', 'SR']:
                 df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
             return df[['Player', 'Season', 'Runs', 'Ave', 'SR']]
         else:
             df = df.rename(columns={'Span': 'Season', 'Wkts': 'Wkts', 'Ave': 'Ave', 'Econ': 'Econ'})
-            df['Player'] = df['Player'].str.replace(r'[^\w\s]', '', regex=True).str.strip()
             for col in ['Wkts', 'Ave', 'Econ']:
                 df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
             return df[['Player', 'Season', 'Wkts', 'Ave', 'Econ']]
@@ -45,23 +47,18 @@ def scrape_cricinfo(url, discipline):
         st.sidebar.error(f"Scrape Error: {e}")
         return None
 
-# --- 2. APP CONFIG ---
+# --- 2. GLOBAL HELPERS ---
 st.set_page_config(page_title="Cricket Stats Engine", layout="wide")
 
-# Helpers
 def fmt(count, total):
     if total <= 0: return "0 (0.0%)"
     perc = (count * 100.0 / total)
     return f"{int(count)} ({perc:.1f}%)"
 
 def get_profile_label(w, t, l):
-    if w == 3: return "🏆 Beat all 3 categories"
-    if w == 2 and t == 1: return "⭐ Beat 2 categories, Tied 1 category"
-    if w == 2 and l == 1: return "✅ Beat 2 categories, Lost 1 category"
-    if w == 1 and t == 2: return "⚠️ Beat 1 category, Tied 2 categories"
-    if w == 1 and t == 1 and l == 1: return "⚖️ Beat 1 category, Tied 1, Lost 1 (Tie Case)"
-    if w == 0 and t == 3: return "🎯 Tied all 3 categories"
-    if w == 0 and t == 2 and l == 1: return "🤏 Tied 2 categories, Lost 1 category"
+    if w == 3: return "🏆 Beat all 3"
+    if w == 2 and t == 1: return "⭐ Beat 2, Tied 1"
+    if w == 2 and l == 1: return "✅ Beat 2, Lost 1"
     return "Other"
 
 def display_styled_results(df, title_prefix):
@@ -69,11 +66,10 @@ def display_styled_results(df, title_prefix):
         st.warning("No records found.")
         return
     df['Result_Profile'] = df.apply(lambda row: get_profile_label(row['WinsA'], row['TiesA'], row['LossesA']), axis=1)
-    st.subheader(f"📊 Summary of Milestones ({title_prefix})")
+    st.subheader(f"📊 Summary: {title_prefix}")
     for profile, count in df['Result_Profile'].value_counts().items():
         st.write(f"- **{count}** records: {profile}")
     st.divider()
-    st.subheader("📋 Respective Lists by Category")
     for profile in sorted(df['Result_Profile'].unique(), reverse=True):
         cols_to_drop = ['WinsA', 'TiesA', 'LossesA', 'Result_Profile']
         if 'WinsB' in df.columns: cols_to_drop.append('WinsB')
@@ -81,49 +77,52 @@ def display_styled_results(df, title_prefix):
         st.markdown(f"#### {profile}")
         st.dataframe(df[df['Result_Profile'] == profile].drop(columns=cols_to_drop), use_container_width=True, hide_index=True)
 
-# --- 3. DATABASE SETUP ---
+# --- 3. DATABASE HANDLER ---
 st.sidebar.title("🌐 Live Data Scraper")
 bat_url = st.sidebar.text_input("ESPN Batting Link")
 bowl_url = st.sidebar.text_input("ESPN Bowling Link")
 
 if "scraped_db" not in st.session_state: st.session_state.scraped_db = None
 
-if st.sidebar.button("🚀 Build Database from Links"):
+if st.sidebar.button("🚀 Build Database"):
     if bat_url and bowl_url:
-        with st.spinner("Scraping data..."):
-            b_df = scrape_cricinfo(bat_url, "batting")
-            w_df = scrape_cricinfo(bowl_url, "bowling")
+        with st.spinner("Scraping..."):
+            b_df, w_df = scrape_cricinfo(bat_url, "batting"), scrape_cricinfo(bowl_url, "bowling")
             if b_df is not None and w_df is not None:
                 tmp_conn = sqlite3.connect(':memory:', check_same_thread=False)
                 b_df.to_sql('batting', tmp_conn, index=False)
                 w_df.to_sql('bowling', tmp_conn, index=False)
                 st.session_state.scraped_db = tmp_conn
                 st.sidebar.success("Database Ready!")
-            else: st.sidebar.error("Could not find data on pages.")
+            else: st.sidebar.error("Scrape failed.")
 
 conn = st.session_state.scraped_db if st.session_state.scraped_db else sqlite3.connect('cricket_stats.db', check_same_thread=False)
 
 # --- 4. LOGIN ---
-st.title("🏏 Player Stats & Analytics")
-password = st.text_input("Enter Password to Access", type="password")
+st.title("🏏 Player Stats & Analytics Engine")
+password = st.text_input("Password", type="password")
 if password != "long live martell":
     st.error("Access Denied.")
     st.stop()
 
-# --- 5. STATE ---
+# --- 5. INITIALIZE STATE ---
 if "nav_choice" not in st.session_state: st.session_state.nav_choice = "Batting Milestones"
-for k, v in {"bat_runs_a":300, "bat_avg_a":40.0, "bat_sr_a":90.0, "bowl_w_a":15, "bowl_a_a":25.0, "bowl_e_a":5.0}.items():
-    if k not in st.session_state: st.session_state[k] = v
+if "bat_runs_a" not in st.session_state: st.session_state.bat_runs_a = 300
+if "bat_avg_a" not in st.session_state: st.session_state.bat_avg_a = 40.0
+if "bat_sr_a" not in st.session_state: st.session_state.bat_sr_a = 90.0
+if "bowl_w_a" not in st.session_state: st.session_state.bowl_w_a = 15
+if "bowl_a_a" not in st.session_state: st.session_state.bowl_a_a = 25.0
+if "bowl_e_a" not in st.session_state: st.session_state.bowl_e_a = 5.0
 if "squad_a" not in st.session_state: st.session_state.squad_a, st.session_state.squad_b = [], []
 
 # --- 6. NAVIGATION ---
 nav_options = ["Batting Milestones", "Bowling Milestones", "📈 Player Analytics", "👤 Player Details", "🏟️ Squad Comparison", "🧬 Format Analysis"]
-st.session_state.nav_choice = st.radio("Select Section:", nav_options, index=nav_options.index(st.session_state.nav_choice), horizontal=True)
+st.session_state.nav_choice = st.radio("Navigate:", nav_options, index=nav_options.index(st.session_state.nav_choice), horizontal=True)
 st.divider()
 
 # TAB 1: BATTING
 if st.session_state.nav_choice == "Batting Milestones":
-    f_m = st.radio("Mode:", ["Meet Set A Only", "Meet BOTH Set A and Set B"], horizontal=True)
+    f_m = st.radio("Mode:", ["Set A Only", "Set A and B"], horizontal=True)
     c1, c2 = st.columns(2)
     with c1:
         tr1a = st.number_input("Min Runs (A)", value=st.session_state.bat_runs_a)
@@ -132,12 +131,12 @@ if st.session_state.nav_choice == "Batting Milestones":
         st.session_state.bat_runs_a, st.session_state.bat_avg_a, st.session_state.bat_sr_a = tr1a, ta1a, ts1a
     with c2:
         tr1b, ta1b, ts1b = st.number_input("Min Runs (B)", 500), st.number_input("Min Avg (B)", 50.0), st.number_input("Min SR (B)", 100.0)
-    q = f"WITH Base AS (SELECT Player, Season as Year, Runs, Ave as Average, SR as Strike_Rate, (CASE WHEN Runs > {tr1a} THEN 1 ELSE 0 END + CASE WHEN Ave > {ta1a} THEN 1 ELSE 0 END + CASE WHEN SR > {ts1a} THEN 1 ELSE 0 END) as WinsA, (CASE WHEN Runs = {tr1a} THEN 1 ELSE 0 END + CASE WHEN Ave = {ta1a} THEN 1 ELSE 0 END + CASE WHEN SR = {ts1a} THEN 1 ELSE 0 END) as TiesA, (CASE WHEN Runs < {tr1a} THEN 1 ELSE 0 END + CASE WHEN Ave < {ta1a} THEN 1 ELSE 0 END + CASE WHEN SR < {ts1a} THEN 1 ELSE 0 END) as LossesA, (CASE WHEN Runs > {tr1b} THEN 1 ELSE 0 END + CASE WHEN Ave > {ta1b} THEN 1 ELSE 0 END + CASE WHEN SR > {ts1b} THEN 1 ELSE 0 END) as WinsB, (CASE WHEN Runs = {tr1b} THEN 1 ELSE 0 END + CASE WHEN Ave = {ta1b} THEN 1 ELSE 0 END + CASE WHEN SR = {ts1b} THEN 1 ELSE 0 END) as TiesB FROM batting) SELECT * FROM Base WHERE (WinsA + TiesA) >= 2 {'AND (WinsB + TiesB) >= 2' if 'BOTH' in f_m else ''} ORDER BY WinsA DESC, Runs DESC"
+    q = f"WITH Base AS (SELECT Player, Season as Year, Runs, Ave as Average, SR as Strike_Rate, (CASE WHEN Runs > {tr1a} THEN 1 ELSE 0 END + CASE WHEN Ave > {ta1a} THEN 1 ELSE 0 END + CASE WHEN SR > {ts1a} THEN 1 ELSE 0 END) as WinsA, (CASE WHEN Runs = {tr1a} THEN 1 ELSE 0 END + CASE WHEN Ave = {ta1a} THEN 1 ELSE 0 END + CASE WHEN SR = {ts1a} THEN 1 ELSE 0 END) as TiesA, (CASE WHEN Runs < {tr1a} THEN 1 ELSE 0 END + CASE WHEN Ave < {ta1a} THEN 1 ELSE 0 END + CASE WHEN SR < {ts1a} THEN 1 ELSE 0 END) as LossesA, (CASE WHEN Runs > {tr1b} THEN 1 ELSE 0 END + CASE WHEN Ave > {ta1b} THEN 1 ELSE 0 END + CASE WHEN SR > {ts1b} THEN 1 ELSE 0 END) as WinsB, (CASE WHEN Runs = {tr1b} THEN 1 ELSE 0 END + CASE WHEN Ave = {ta1b} THEN 1 ELSE 0 END + CASE WHEN SR = {ts1b} THEN 1 ELSE 0 END) as TiesB FROM batting) SELECT * FROM Base WHERE (WinsA + TiesA) >= 2 {'AND (WinsB + TiesB) >= 2' if 'Set A and B' in f_m else ''} ORDER BY WinsA DESC, Runs DESC"
     display_styled_results(pd.read_sql(q, conn), "Batting")
 
 # TAB 2: BOWLING
 elif st.session_state.nav_choice == "Bowling Milestones":
-    f_m = st.radio("Mode:", ["Meet Set A Only", "Meet BOTH Set A and Set B"], horizontal=True)
+    f_m = st.radio("Mode:", ["Set A Only", "Set A and B"], horizontal=True)
     c1, c2 = st.columns(2)
     with c1:
         twa = st.number_input("Min Wickets (A)", value=st.session_state.bowl_w_a)
@@ -146,14 +145,13 @@ elif st.session_state.nav_choice == "Bowling Milestones":
         st.session_state.bowl_w_a, st.session_state.bowl_a_a, st.session_state.bowl_e_a = twa, taa, tea
     with c2:
         twb, tab, teb = st.number_input("Min Wkts (B)", 20), st.number_input("Max Avg (B)", 20.0), st.number_input("Max Econ (B)", 4.5)
-    q = f"WITH Base AS (SELECT Player, Season as Year, Wkts as Wickets, Ave as Average, Econ as Economy, (CASE WHEN Wkts > {twa} THEN 1 ELSE 0 END + CASE WHEN Ave < {taa} THEN 1 ELSE 0 END + CASE WHEN Econ < {tea} THEN 1 ELSE 0 END) as WinsA, (CASE WHEN Wkts = {twa} THEN 1 ELSE 0 END + CASE WHEN Ave = {taa} THEN 1 ELSE 0 END + CASE WHEN Econ = {tea} THEN 1 ELSE 0 END) as TiesA, (CASE WHEN Wkts < {twa} THEN 1 ELSE 0 END + CASE WHEN Ave > {taa} THEN 1 ELSE 0 END + CASE WHEN Econ > {tea} THEN 1 ELSE 0 END) as LossesA, (CASE WHEN Wkts > {twb} THEN 1 ELSE 0 END + CASE WHEN Ave < {tab} THEN 1 ELSE 0 END + CASE WHEN Econ < {teb} THEN 1 ELSE 0 END) as WinsB, (CASE WHEN Wkts = {twb} THEN 1 ELSE 0 END + CASE WHEN Ave < {tab} THEN 1 ELSE 0 END + CASE WHEN Econ < {teb} THEN 1 ELSE 0 END) as TiesB FROM bowling) SELECT * FROM Base WHERE (WinsA + TiesA) >= 2 {'AND (WinsB + TiesB) >= 2' if 'BOTH' in f_m else ''} ORDER BY WinsA DESC, Wickets DESC"
+    q = f"WITH Base AS (SELECT Player, Season as Year, Wkts as Wickets, Ave as Average, Econ as Economy, (CASE WHEN Wkts > {twa} THEN 1 ELSE 0 END + CASE WHEN Ave < {taa} THEN 1 ELSE 0 END + CASE WHEN Econ < {tea} THEN 1 ELSE 0 END) as WinsA, (CASE WHEN Wkts = {twa} THEN 1 ELSE 0 END + CASE WHEN Ave = {taa} THEN 1 ELSE 0 END + CASE WHEN Econ = {tea} THEN 1 ELSE 0 END) as TiesA, (CASE WHEN Wkts < {twa} THEN 1 ELSE 0 END + CASE WHEN Ave > {taa} THEN 1 ELSE 0 END + CASE WHEN Econ > {tea} THEN 1 ELSE 0 END) as LossesA, (CASE WHEN Wkts > {twb} THEN 1 ELSE 0 END + CASE WHEN Ave < {tab} THEN 1 ELSE 0 END + CASE WHEN Econ < {teb} THEN 1 ELSE 0 END) as WinsB, (CASE WHEN Wkts = {twb} THEN 1 ELSE 0 END + CASE WHEN Ave < {tab} THEN 1 ELSE 0 END + CASE WHEN Econ < {teb} THEN 1 ELSE 0 END) as TiesB FROM bowling) SELECT * FROM Base WHERE (WinsA + TiesA) >= 2 {'AND (WinsB + TiesB) >= 2' if 'Set A and B' in f_m else ''} ORDER BY WinsA DESC, Wickets DESC"
     display_styled_results(pd.read_sql(q, conn), "Bowling")
 
 # TAB 3: ANALYTICS
 elif st.session_state.nav_choice == "📈 Player Analytics":
-    choice = st.radio("Type:", ["Career Consistency", "Global Rankings"], horizontal=True)
-    disc = st.radio("Disc:", ["Batting", "Bowling"], horizontal=True, key="disc_t3")
-    t = disc.lower()
+    choice = st.radio("Type:", ["Consistency", "Rankings"], horizontal=True)
+    t = st.radio("Disc:", ["Batting", "Bowling"], horizontal=True).lower()
     if "Consistency" in choice:
         c1, c2, c3 = st.columns(3)
         if t == "batting":
@@ -171,7 +169,7 @@ elif st.session_state.nav_choice == "📈 Player Analytics":
         df = pd.read_sql(q, conn); df['Wins %'] = df.apply(lambda r: fmt(r['WC'], r['TR']-1), axis=1); df['Losses'] = df.apply(lambda r: fmt(r['LC'], r['TR']-1), axis=1); df['Ties'] = df.apply(lambda r: fmt(r['TR']-r['WC']-r['LC']-1, r['TR']-1), axis=1)
         st.dataframe(df.sort_values("WC", ascending=False)[['Player', 'Season', 'Wins %', 'Losses', 'Ties']], use_container_width=True, hide_index=True)
 
-# TAB 4: DETAILS
+# TAB 4: PLAYER DETAILS
 elif st.session_state.nav_choice == "👤 Player Details":
     all_p = sorted(list(set(pd.read_sql("SELECT Player FROM batting", conn)['Player']) | set(pd.read_sql("SELECT Player FROM bowling", conn)['Player'])))
     target = st.selectbox("Select Player", all_p)
@@ -193,7 +191,7 @@ elif st.session_state.nav_choice == "👤 Player Details":
 
 # TAB 5: SQUAD
 elif st.session_state.nav_choice == "🏟️ Squad Comparison":
-    with st.expander("🛠️ Manage Squad Codes"):
+    with st.expander("🛠️ Squad Management"):
         c1, c2 = st.columns(2)
         if c1.button("🗑️ Clear"): st.session_state.squad_a, st.session_state.squad_b = [], []; st.rerun()
         c2.text_input("📋 Code", value=json.dumps({"a": st.session_state.squad_a, "b": st.session_state.squad_b}))
@@ -201,24 +199,26 @@ elif st.session_state.nav_choice == "🏟️ Squad Comparison":
     all_p = sorted(list(set(pd.read_sql("SELECT Player FROM batting", conn)['Player']) | set(pd.read_sql("SELECT Player FROM bowling", conn)['Player'])))
     c1, c2 = st.columns(2)
     with c1:
-        n = st.selectbox("Add to A", [""]+all_p, key="sqa"); (st.session_state.squad_a.append(n), st.rerun()) if n and n not in st.session_state.squad_a else None
+        n = st.selectbox("Add Player to A", [""]+all_p, key="sqa"); (st.session_state.squad_a.append(n), st.rerun()) if n and n not in st.session_state.squad_a else None
         st.session_state.squad_a = st.multiselect("Squad A", st.session_state.squad_a, default=st.session_state.squad_a)
     with c2:
-        n = st.selectbox("Add to B", [""]+all_p, key="sqb"); (st.session_state.squad_b.append(n), st.rerun()) if n and n not in st.session_state.squad_b else None
+        n = st.selectbox("Add Player to B", [""]+all_p, key="sqb"); (st.session_state.squad_b.append(n), st.rerun()) if n and n not in st.session_state.squad_b else None
         st.session_state.squad_b = st.multiselect("Squad B", st.session_state.squad_b, default=st.session_state.squad_b)
+    
     if st.session_state.squad_a and st.session_state.squad_b:
         sub = st.radio("Mode:", ["Benchmarking", "Standings"], horizontal=True)
         if sub == "Benchmarking":
             d_dir = st.radio("Dir:", ["A to B", "B to A"], horizontal=True)
             src, trg = (st.session_state.squad_a, st.session_state.squad_b) if "A to" in d_dir else (st.session_state.squad_b, st.session_state.squad_a)
-            p = st.selectbox("Benchmark Player:", src, key=f"sq_p_{d_dir}")
+            p = st.selectbox("Pick Benchmark Player:", src, key=f"sq_p_{d_dir}")
             if p:
                 b_y, w_y = pd.read_sql(f"SELECT Season FROM batting WHERE Player='{p}'", conn)['Season'].tolist(), pd.read_sql(f"SELECT Season FROM bowling WHERE Player='{p}'", conn)['Season'].tolist()
                 disc = st.radio("Type:", (["Batting"] if b_y else []) + (["Bowling"] if w_y else []), horizontal=True)
                 y = st.selectbox("Year:", b_y if disc == "Batting" else w_y)
                 if y:
                     bench = pd.read_sql(f"SELECT * FROM {'batting' if disc=='Batting' else 'bowling'} WHERE Player='{p}' AND Season='{y}'", conn).iloc[0]
-                    st.info(f"📍 Bench: {p} ({y})")
+                    # SHOW BENCHMARK STATS
+                    st.info(f"📍 Benchmark: {p} ({y})")
                     met = st.columns(3)
                     if disc == "Batting":
                         tr, ta, ts = bench['Runs'], bench['Ave'], bench['SR']
@@ -230,56 +230,56 @@ elif st.session_state.nav_choice == "🏟️ Squad Comparison":
                         q = f"SELECT Player, Season as Year, Wkts as Wickets, Ave as Average, Econ as Economy, (CASE WHEN Wkts > {tw} THEN 1 ELSE 0 END + CASE WHEN Ave < {tav} THEN 1 ELSE 0 END + CASE WHEN Econ < {te} THEN 1 ELSE 0 END) as WinsA, (CASE WHEN Wkts = {tw} THEN 1 ELSE 0 END + CASE WHEN Ave = {tav} THEN 1 ELSE 0 END + CASE WHEN Econ = {te} THEN 1 ELSE 0 END) as TiesA, (CASE WHEN Wkts < {tw} THEN 1 ELSE 0 END + CASE WHEN Ave > {tav} THEN 1 ELSE 0 END + CASE WHEN Econ > {te} THEN 1 ELSE 0 END) as LossesA FROM bowling WHERE Player IN ('" + "','".join(trg) + "') ORDER BY WinsA DESC"
                     display_styled_results(pd.read_sql(q, conn), f"Against {p}")
         else:
-            disc_st = st.radio("Disc:", ["Batting", "Bowling"], horizontal=True)
-            tbl = disc_st.lower(); a_l, b_l = "('" + "','".join(st.session_state.squad_a) + "')", "('" + "','".join(st.session_state.squad_b) + "')"
-            win = "((CASE WHEN A.Runs > B.Runs THEN 1 ELSE 0 END) + (CASE WHEN A.Ave > B.Ave THEN 1 ELSE 0 END) + (CASE WHEN A.SR > B.SR THEN 1 ELSE 0 END))" if tbl == "batting" else "((CASE WHEN A.Wkts > B.Wkts THEN 1 ELSE 0 END) + (CASE WHEN A.Ave < B.Ave THEN 1 ELSE 0 END) + (CASE WHEN A.Econ < B.Econ THEN 1 ELSE 0 END))"
-            loss = "((CASE WHEN B.Runs > A.Runs THEN 1 ELSE 0 END) + (CASE WHEN B.Ave > A.Ave THEN 1 ELSE 0 END) + (CASE WHEN B.SR > A.SR THEN 1 ELSE 0 END))" if tbl == "batting" else "((CASE WHEN B.Wkts > A.Wkts THEN 1 ELSE 0 END) + (CASE WHEN B.Ave < A.Ave THEN 1 ELSE 0 END) + (CASE WHEN B.Econ < A.Econ THEN 1 ELSE 0 END))"
-            c_a, c_b = st.columns(2)
-            with c_a:
+            t = st.radio("Choose Discipline:", ["Batting", "Bowling"], horizontal=True).lower()
+            a_l = "('" + "','".join(st.session_state.squad_a) + "')"
+            b_l = "('" + "','".join(st.session_state.squad_b) + "')"
+            win = "((CASE WHEN A.Runs > B.Runs THEN 1 ELSE 0 END) + (CASE WHEN A.Ave > B.Ave THEN 1 ELSE 0 END) + (CASE WHEN A.SR > B.SR THEN 1 ELSE 0 END))" if t == "batting" else "((CASE WHEN A.Wkts > B.Wkts THEN 1 ELSE 0 END) + (CASE WHEN A.Ave < B.Ave THEN 1 ELSE 0 END) + (CASE WHEN A.Econ < B.Econ THEN 1 ELSE 0 END))"
+            loss = "((CASE WHEN B.Runs > A.Runs THEN 1 ELSE 0 END) + (CASE WHEN B.Ave > A.Ave THEN 1 ELSE 0 END) + (CASE WHEN B.SR > A.SR THEN 1 ELSE 0 END))" if t == "batting" else "((CASE WHEN B.Wkts > A.Wkts THEN 1 ELSE 0 END) + (CASE WHEN B.Ave < A.Ave THEN 1 ELSE 0 END) + (CASE WHEN B.Econ < A.Econ THEN 1 ELSE 0 END))"
+            c1, c2 = st.columns(2)
+            with c1:
                 st.write("A vs B")
-                q_a = f"SELECT A.Player, A.Season, (SELECT COUNT(*) FROM {tbl} B WHERE B.Player IN {b_l}) as TR, (SELECT COUNT(*) FROM {tbl} B WHERE B.Player IN {b_l} AND {win} >= 2) as WC, (SELECT COUNT(*) FROM {tbl} B WHERE B.Player IN {b_l} AND {loss} >= 2) as LC FROM {tbl} A WHERE A.Player IN {a_l}"
-                df_a = pd.read_sql(q_a, conn); df_a['Wins'], df_a['Losses'], df_a['Ties'] = df_a.apply(lambda r: fmt(r['WC'], r['TR']), axis=1), df_a.apply(lambda r: fmt(r['LC'], r['TR']), axis=1), df_a.apply(lambda r: fmt(r['TR']-r['WC']-r['LC'], r['TR']), axis=1)
-                st.dataframe(df_a[['Player', 'Season', 'Wins', 'Losses', 'Ties']], hide_index=True)
-            with c_b:
+                q = f"SELECT A.Player, A.Season, (SELECT COUNT(*) FROM {t} B WHERE B.Player IN {b_l}) as TR, (SELECT COUNT(*) FROM {t} B WHERE B.Player IN {b_l} AND {win} >= 2) as WC, (SELECT COUNT(*) FROM {t} B WHERE B.Player IN {b_l} AND {loss} >= 2) as LC FROM {t} A WHERE A.Player IN {a_l}"
+                df = pd.read_sql(q, conn); df['Wins'], df['Losses'], df['Ties'] = df.apply(lambda r: fmt(r['WC'], r['TR']), axis=1), df.apply(lambda r: fmt(r['LC'], r['TR']), axis=1), df.apply(lambda r: fmt(r['TR']-r['WC']-r['LC'], r['TR']), axis=1)
+                st.dataframe(df[['Player', 'Season', 'Wins', 'Losses', 'Ties']], hide_index=True)
+            with c2:
                 st.write("B vs A")
-                q_b = f"SELECT A.Player, A.Season, (SELECT COUNT(*) FROM {tbl} B WHERE B.Player IN {a_l}) as TR, (SELECT COUNT(*) FROM {tbl} B WHERE B.Player IN {a_l} AND {win} >= 2) as WC, (SELECT COUNT(*) FROM {tbl} B WHERE B.Player IN {a_l} AND {loss} >= 2) as LC FROM {tbl} A WHERE A.Player IN {b_l}"
-                df_b = pd.read_sql(q_b, conn); df_b['Wins'], df_b['Losses'], df_b['Ties'] = df_b.apply(lambda r: fmt(r['WC'], r['TR']), axis=1), df_b.apply(lambda r: fmt(r['LC'], r['TR']), axis=1), df_b.apply(lambda r: fmt(r['TR']-r['WC']-r['LC'], r['TR']), axis=1)
-                st.dataframe(df_b[['Player', 'Season', 'Wins', 'Losses', 'Ties']], hide_index=True)
+                q = f"SELECT A.Player, A.Season, (SELECT COUNT(*) FROM {t} B WHERE B.Player IN {a_l}) as TR, (SELECT COUNT(*) FROM {t} B WHERE B.Player IN {a_l} AND {win} >= 2) as WC, (SELECT COUNT(*) FROM {t} B WHERE {loss} >= 2) as LC FROM {t} A WHERE A.Player IN {b_l}"
+                df = pd.read_sql(q, conn); df['Wins'], df['Losses'], df['Ties'] = df.apply(lambda r: fmt(r['WC'], r['TR']), axis=1), df.apply(lambda r: fmt(r['LC'], r['TR']), axis=1), df.apply(lambda r: fmt(r['TR']-r['WC']-r['LC'], r['TR']), axis=1)
+                st.dataframe(df[['Player', 'Season', 'Wins', 'Losses', 'Ties']], hide_index=True)
 
 # TAB 6: FORMAT
 elif st.session_state.nav_choice == "🧬 Format Analysis":
     sub6 = st.radio("Feature:", ["🛡️ Unbeatable Combinations", "🔍 Group Killers"], horizontal=True)
-    df_f = st.radio("Disc:", ["Batting", "Bowling"], horizontal=True, key="disc_fa")
-    t = df_f.lower(); pl = sorted(pd.read_sql(f"SELECT DISTINCT Player FROM {t}", conn)['Player'].tolist())
+    t = st.radio("Disc:", ["Batting", "Bowling"], horizontal=True).lower()
+    pl = sorted(pd.read_sql(f"SELECT DISTINCT Player FROM {t}", conn)['Player'].tolist())
     if "Unbeatable" in sub6:
         cx1, cx2 = st.columns(2)
-        with cx1: omit_cand = st.multiselect("Omit from combination pool:", pl, key="o1")
-        with cx2: omit_kill = st.multiselect("Omit from 'Killers' database:", pl, key="o2")
+        with cx1: o1 = st.multiselect("Omit from Pool:", pl)
+        with cx2: o2 = st.multiselect("Omit from Check:", pl)
         k_v = st.radio("Size (K):", [1, 2, 3], horizontal=True)
-        if st.button("🚀 Find Combinations"):
+        if st.button("🚀 Find"):
             with st.spinner("Analyzing..."):
-                df_all = pd.read_sql(f"SELECT * FROM {t}", conn); df_k = df_all[~df_all['Player'].isin(omit_kill)]; cand = [p for p in pl if p not in omit_cand]
-                kill_sets = []
+                df = pd.read_sql(f"SELECT * FROM {t}", conn); df_k = df[~df['Player'].isin(o2)]; cand = [p for p in pl if p not in o1]; k_sets = []
                 for _, rx in df_k.iterrows():
                     beaten = set()
-                    for p_n in cand:
-                        py = df_all[df_all['Player']==p_n]; b = 0
+                    for pn in cand:
+                        py = df[df['Player']==pn]; b = 0
                         for _, rp in py.iterrows():
                             if t=="batting": w = int(rx['Runs']>rp['Runs'])+int(rx['Ave']>rp['Ave'])+int(rx['SR']>rp['SR'])
                             else: w = int(rx['Wkts']>rp['Wkts'])+int(rx['Ave']<rp['Ave'])+int(rx['Econ']<rp['Econ'])
                             if w >= 2: b += 1
-                        if b == len(py): beaten.add(p_n)
-                    kill_sets.append(beaten)
+                        if b == len(py): beaten.add(pn)
+                    k_sets.append(beaten)
                 res = []
                 for combo in combinations(cand, k_v):
                     cs = set(combo); unb = True
-                    for ks in kill_sets:
+                    for ks in k_sets:
                         if cs.issubset(ks): unb = False; break
                     if unb: res.append(list(combo))
                 if res: st.dataframe(pd.DataFrame(res, columns=[f"P{i+1}" for i in range(k_v)]), hide_index=True)
     else:
         target = st.multiselect("Select Group:", pl)
-        if st.button("🔎 Find Killer Years"):
+        if st.button("🔎 Find Killers"):
             df_full = pd.read_sql(f"SELECT * FROM {t}", conn); kl = []
             for _, rx in df_full.iterrows():
                 e = True
