@@ -126,7 +126,7 @@ if c_sb2.button("🗑️ Reset DB"):
 # --- 5. AUTH ---
 st.title("🏏 Player Stats & Analytics Engine")
 password = st.text_input("Enter Password", type="password")
-if password != "long live martell":
+if password != "qcc_stat_tourno":
     st.error("Access Denied.")
     st.stop()
 
