@@ -7,15 +7,40 @@ from bs4 import BeautifulSoup
 from itertools import combinations
 import os
 import io
+import glob
 
 # --- 1. DATABASE & CONNECTION MANAGER ---
+# Scraped datasets are now named (one .db file per name) instead of a single
+# shared 'scraped_stats.db'. Each browser tab picks its own "Active Dataset"
+# in its own session_state, so two tabs can independently work on e.g. Test
+# stats and ODI stats at the same time without stomping on each other.
 LOCAL_DB_FILE = 'cricket_stats.db'
-SCRAPED_DB_FILE = 'scraped_stats.db'
+RESERVED_NAMES = {"Local"}
+
+def safe_dataset_name(raw):
+    """Sanitize a user-typed dataset name into a safe filename stem."""
+    name = "".join(c for c in raw.strip() if c.isalnum() or c in ("_", "-"))
+    return name or "scraped_stats"
+
+def list_scraped_datasets():
+    """All named scraped datasets currently on disk (excludes the local DB)."""
+    names = []
+    for f in glob.glob("*.db"):
+        stem = f[:-3]
+        if f == LOCAL_DB_FILE or stem in RESERVED_NAMES:
+            continue
+        names.append(stem)
+    return sorted(names)
 
 def get_db_info():
-    """Returns (connection, time_column_name)"""
-    if st.session_state.get("use_scraped_db", False) and os.path.exists(SCRAPED_DB_FILE):
-        return sqlite3.connect(SCRAPED_DB_FILE, check_same_thread=False), "Year"
+    """Returns (connection, time_column_name) for THIS tab's active dataset selection."""
+    active = st.session_state.get("active_dataset", "Local")
+    if active != "Local":
+        path = f"{active}.db"
+        if os.path.exists(path):
+            return sqlite3.connect(path, check_same_thread=False), "Year"
+        # Dataset was deleted (e.g. by another tab) since this tab last checked.
+        st.session_state.active_dataset = "Local"
     return sqlite3.connect(LOCAL_DB_FILE, check_same_thread=False), "Season"
 
 # --- 1.5 CUSTOMIZABLE METRIC CONFIG ---
@@ -203,32 +228,61 @@ def display_styled_results(df, title_prefix):
 
 # --- 4. SIDEBAR CONFIG ---
 st.sidebar.title("🌐 Live Data Bridge")
-if "use_scraped_db" not in st.session_state: st.session_state.use_scraped_db = False
+if "active_dataset" not in st.session_state: st.session_state.active_dataset = "Local"
 
-if st.session_state.use_scraped_db: st.sidebar.success("🟢 Active: Scraped Database (uses 'Year')")
-else: st.sidebar.info("🏠 Active: Local Database (uses 'Season')")
+dataset_options = ["Local"] + list_scraped_datasets()
+if st.session_state.active_dataset not in dataset_options:
+    st.session_state.active_dataset = "Local"  # dataset vanished (deleted elsewhere) - fall back safely
 
+st.session_state.active_dataset = st.sidebar.selectbox(
+    "📂 Active Dataset (this tab only)",
+    dataset_options,
+    index=dataset_options.index(st.session_state.active_dataset),
+)
+
+if st.session_state.active_dataset == "Local":
+    st.sidebar.info("🏠 Active: Local Database (uses 'Season')")
+else:
+    st.sidebar.success(f"🟢 Active: '{st.session_state.active_dataset}' (uses 'Year')")
+
+st.sidebar.divider()
+st.sidebar.caption("Build a new dataset")
 b_link = st.sidebar.text_input("ESPN Batting Link")
 w_link = st.sidebar.text_input("ESPN Bowling Link")
+dataset_name_input = st.sidebar.text_input("Dataset Name", placeholder="e.g. Test_2024, ODI_AUS_series")
 
-c_sb1, c_sb2 = st.sidebar.columns(2)
-if c_sb1.button("🚀 Build DB"):
+if st.sidebar.button("🚀 Build DB"):
     if b_link and w_link:
-        with st.spinner("Rebuilding engine..."):
+        safe_name = safe_dataset_name(dataset_name_input)
+        with st.spinner(f"Building '{safe_name}'..."):
             b_df = scrape_full_cricinfo(b_link, "batting")
             w_df = scrape_full_cricinfo(w_link, "bowling")
             if b_df is not None and w_df is not None:
-                tmp_conn = sqlite3.connect(SCRAPED_DB_FILE)
+                tmp_conn = sqlite3.connect(f"{safe_name}.db")
                 b_df.to_sql('batting', tmp_conn, index=False, if_exists='replace')
                 w_df.to_sql('bowling', tmp_conn, index=False, if_exists='replace')
                 tmp_conn.close()
-                st.session_state.use_scraped_db = True
+                st.session_state.active_dataset = safe_name  # this tab switches straight to it
                 st.rerun()
+            else:
+                st.sidebar.error("Scraping failed — check the links and try again.")
+    else:
+        st.sidebar.warning("Paste both links before building.")
 
-if c_sb2.button("🗑️ Reset DB"):
-    st.session_state.use_scraped_db = False
-    if os.path.exists(SCRAPED_DB_FILE): os.remove(SCRAPED_DB_FILE)
-    st.rerun()
+st.sidebar.divider()
+st.sidebar.caption("Delete the currently active dataset")
+confirm_delete = st.sidebar.checkbox("Confirm delete", key="confirm_delete_active_dataset")
+if st.sidebar.button("🗑️ Delete Active Dataset"):
+    active = st.session_state.active_dataset
+    if active == "Local":
+        st.sidebar.warning("The Local database can't be deleted here.")
+    elif not confirm_delete:
+        st.sidebar.warning("Tick 'Confirm delete' first — this removes the file for every tab using it.")
+    else:
+        path = f"{active}.db"
+        if os.path.exists(path): os.remove(path)
+        st.session_state.active_dataset = "Local"
+        st.rerun()
 
 # --- 5. AUTH ---
 st.title("🏏 Player Stats & Analytics Engine")
