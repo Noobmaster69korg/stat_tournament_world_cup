@@ -9,6 +9,7 @@ import os
 import io
 import glob
 import subprocess
+import re
 
 # --- 1. DATABASE & CONNECTION MANAGER ---
 # Scraped datasets are now named (one .db file per name) instead of a single
@@ -228,6 +229,60 @@ def compare_rows(row_a, row_b, metrics):
             wins += 1
     return wins
 
+# --- 1.6 YEAR / COUNTRY FILTERING ---
+# Neither table has a dedicated Country column - it's baked into the player
+# name as a trailing code (e.g. "SL Malinga SL", "Umar Gul PAK"). We detect it
+# heuristically and only surface the country filter when the dataset actually
+# looks like it follows that convention.
+def extract_year_num(val):
+    """Pulls a 4-digit year out of a Season/Year value (handles '2019', '2019/20', etc.)."""
+    m = re.search(r"(\d{4})", str(val))
+    return int(m.group(1)) if m else None
+
+def extract_country(player_name):
+    """Best-effort: the last whitespace-separated token of the player name."""
+    if not isinstance(player_name, str) or not player_name.strip():
+        return "Unknown"
+    tokens = player_name.strip().split()
+    return tokens[-1].upper() if tokens else "Unknown"
+
+def country_filter_is_meaningful(all_players, max_distinct=40):
+    """If almost every player has a 'unique country', it's not really a country
+    code - it's just their surname. Only offer the filter when the number of
+    distinct suffixes is small relative to typical country-code counts."""
+    if not all_players:
+        return False, []
+    codes = sorted(set(extract_country(p) for p in all_players))
+    return (len(codes) <= max_distinct), codes
+
+def build_filtered_connection(raw_conn, t_col, year_range, countries):
+    """Reads batting/bowling from raw_conn, applies year/country filters, and
+    returns a NEW in-memory connection with tables of the SAME names
+    ('batting'/'bowling') - so every existing query elsewhere in the app keeps
+    working unchanged against this filtered view."""
+    bat_df = pd.read_sql("SELECT * FROM batting", raw_conn)
+    bowl_df = pd.read_sql("SELECT * FROM bowling", raw_conn)
+
+    for df in (bat_df, bowl_df):
+        df['__year_num'] = df[t_col].apply(extract_year_num)
+        df['__country'] = df['Player'].apply(extract_country)
+
+    y_min, y_max = year_range
+    bat_df = bat_df[bat_df['__year_num'].notna() & bat_df['__year_num'].between(y_min, y_max)]
+    bowl_df = bowl_df[bowl_df['__year_num'].notna() & bowl_df['__year_num'].between(y_min, y_max)]
+
+    if countries:
+        bat_df = bat_df[bat_df['__country'].isin(countries)]
+        bowl_df = bowl_df[bowl_df['__country'].isin(countries)]
+
+    bat_df = bat_df.drop(columns=['__year_num', '__country'])
+    bowl_df = bowl_df.drop(columns=['__year_num', '__country'])
+
+    mem_conn = sqlite3.connect(":memory:", check_same_thread=False)
+    bat_df.to_sql("batting", mem_conn, index=False)
+    bowl_df.to_sql("bowling", mem_conn, index=False)
+    return mem_conn
+
 # --- 2. ROBUST PAGINATED SCRAPER (Always creates 'Year' column) ---
 def scrape_full_cricinfo(base_url, discipline):
     all_data = []
@@ -423,15 +478,53 @@ if "bat_metrics" not in st.session_state: st.session_state.bat_metrics = DEFAULT
 if "bowl_metrics" not in st.session_state: st.session_state.bowl_metrics = DEFAULT_BOWL_METRICS.copy()
 
 conn, t_col = get_db_info()  # t_col is either 'Season' or 'Year'
+raw_conn = conn  # unfiltered handle - metric config & filter-option detection read from this
 
 with st.expander("⚙️ Configure Comparison Metrics (3 fields per discipline)", expanded=False):
     st.caption("Pick any 3 numeric fields from each table as the comparison criteria, and whether higher or lower is better for each. Everything below (Milestones, Analytics, Squad tools, Format Analysis) uses this config.")
     st.markdown("**Batting**")
-    avail_bat_cols = get_table_columns(conn, "batting")
+    avail_bat_cols = get_table_columns(raw_conn, "batting")
     st.session_state.bat_metrics = metric_picker("bat", avail_bat_cols, st.session_state.bat_metrics, "batting")
     st.markdown("**Bowling**")
-    avail_bowl_cols = get_table_columns(conn, "bowling")
+    avail_bowl_cols = get_table_columns(raw_conn, "bowling")
     st.session_state.bowl_metrics = metric_picker("bowl", avail_bowl_cols, st.session_state.bowl_metrics, "bowling")
+
+with st.expander("🎯 Filter This Dataset (Year Range & Countries)", expanded=False):
+    _all_players_df = pd.read_sql("SELECT Player FROM batting UNION SELECT Player FROM bowling", raw_conn)
+    _all_years_bat = pd.read_sql(f"SELECT {t_col} as yr FROM batting", raw_conn)['yr']
+    _all_years_bowl = pd.read_sql(f"SELECT {t_col} as yr FROM bowling", raw_conn)['yr']
+    _year_nums = pd.concat([_all_years_bat, _all_years_bowl]).apply(extract_year_num).dropna()
+
+    if _year_nums.empty:
+        st.caption("Couldn't detect year values in this dataset — year filter unavailable.")
+        year_range = (0, 9999)
+    else:
+        y_lo, y_hi = int(_year_nums.min()), int(_year_nums.max())
+        if y_lo == y_hi:
+            st.caption(f"This dataset only spans {y_lo} — nothing to range-filter.")
+            year_range = (y_lo, y_hi)
+        else:
+            year_range = st.slider(
+                "Year range", min_value=y_lo, max_value=y_hi, value=(y_lo, y_hi),
+                key=f"year_range_{st.session_state.active_dataset}",
+            )
+
+    show_country_filter, detected_countries = country_filter_is_meaningful(_all_players_df['Player'].tolist())
+    if show_country_filter:
+        selected_countries = st.multiselect(
+            "Countries (leave empty = all)", detected_countries, default=[],
+            key=f"country_filter_{st.session_state.active_dataset}",
+        )
+    else:
+        st.caption("Player names in this dataset don't look like they carry a country code, so country filtering isn't available here.")
+        selected_countries = []
+
+    filters_active = (_year_nums.empty is False and year_range != (int(_year_nums.min()), int(_year_nums.max()))) or bool(selected_countries)
+    if filters_active:
+        st.caption(f"✅ Filter active — {year_range[0]}–{year_range[1]}" + (f", countries: {', '.join(selected_countries)}" if selected_countries else ", all countries"))
+
+if not _year_nums.empty:
+    conn = build_filtered_connection(raw_conn, t_col, year_range, selected_countries)
 
 nav_options = ["Batting Milestones", "Bowling Milestones", "📈 Player Analytics", "👤 Player Details", "🏟️ Squad Comparison", "🧬 Format Analysis"]
 st.session_state.nav_choice = st.radio("Navigate:", nav_options, index=nav_options.index(st.session_state.nav_choice), horizontal=True)
@@ -671,3 +764,5 @@ elif st.session_state.nav_choice == "🧬 Format Analysis":
                 else: st.error("No killers.")
 
 conn.close()
+if raw_conn is not conn:
+    raw_conn.close()
