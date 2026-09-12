@@ -8,6 +8,7 @@ from itertools import combinations
 import os
 import io
 import glob
+import subprocess
 
 # --- 1. DATABASE & CONNECTION MANAGER ---
 # Scraped datasets are now named (one .db file per name) instead of a single
@@ -20,7 +21,10 @@ RESERVED_NAMES = {"Local"}
 def safe_dataset_name(raw):
     """Sanitize a user-typed dataset name into a safe filename stem."""
     name = "".join(c for c in raw.strip() if c.isalnum() or c in ("_", "-"))
-    return name or "scraped_stats"
+    name = name or "scraped_stats"
+    if name in RESERVED_NAMES:
+        name = f"{name}_data"
+    return name
 
 def list_scraped_datasets():
     """All named scraped datasets currently on disk (excludes the local DB)."""
@@ -42,6 +46,78 @@ def get_db_info():
         # Dataset was deleted (e.g. by another tab) since this tab last checked.
         st.session_state.active_dataset = "Local"
     return sqlite3.connect(LOCAL_DB_FILE, check_same_thread=False), "Season"
+
+# --- 1.4 GIT PERSISTENCE HELPERS ---
+# Streamlit Cloud's disk is ephemeral: anything written at runtime (a built or
+# uploaded .db file) is wiped whenever the app sleeps/restarts/redeploys.
+# The only way for a dataset to survive that is to actually be committed into
+# the GitHub repo the app deploys from (exactly like cricket_stats.db already
+# is). These helpers commit/remove a dataset file via git + push, using a
+# GitHub token supplied through Streamlit's secrets (Settings -> Secrets):
+#
+#   GITHUB_TOKEN = "ghp_xxx..."      # a token with 'repo' write access
+#   GITHUB_REPO  = "username/repo"   # the repo this app deploys from
+#   GITHUB_BRANCH = "main"           # optional, defaults to "main"
+#
+# NOTE: pushing a new commit will make Streamlit Cloud auto-redeploy the app
+# shortly after (that's how Streamlit Cloud detects repo changes) - the app
+# will briefly restart, which is expected.
+def _git_creds():
+    token = st.secrets.get("GITHUB_TOKEN") if hasattr(st, "secrets") else None
+    repo = st.secrets.get("GITHUB_REPO") if hasattr(st, "secrets") else None
+    branch = st.secrets.get("GITHUB_BRANCH", "main") if hasattr(st, "secrets") else "main"
+    return token, repo, branch
+
+def git_is_tracked(path):
+    """True if this file is already committed in the repo (i.e. already permanent)."""
+    try:
+        result = subprocess.run(["git", "ls-files", "--error-unmatch", path], capture_output=True, text=True)
+        return result.returncode == 0
+    except Exception:
+        return False
+
+def _git_run(args):
+    return subprocess.run(["git"] + args, capture_output=True, text=True)
+
+def make_dataset_permanent(path, message):
+    """Commits + pushes a dataset file to GitHub so it survives restarts forever."""
+    token, repo, branch = _git_creds()
+    if not token or not repo:
+        return False, "Missing GITHUB_TOKEN / GITHUB_REPO in this app's Secrets (Settings -> Secrets on Streamlit Cloud)."
+    try:
+        _git_run(["config", "user.email", "app@streamlit.local"])
+        _git_run(["config", "user.name", "Cricket Stats App"])
+        _git_run(["add", path])
+        commit = _git_run(["commit", "-m", message])
+        if commit.returncode != 0 and "nothing to commit" not in (commit.stdout + commit.stderr):
+            return False, commit.stderr or commit.stdout
+        remote_url = f"https://{token}@github.com/{repo}.git"
+        push = _git_run(["push", remote_url, f"HEAD:{branch}"])
+        if push.returncode != 0:
+            return False, push.stderr or push.stdout
+        return True, "Committed and pushed. The app will redeploy shortly to reflect this."
+    except Exception as e:
+        return False, str(e)
+
+def remove_dataset_permanently(path, message):
+    """Removes a dataset file from the repo on GitHub (undoes make_dataset_permanent)."""
+    token, repo, branch = _git_creds()
+    if not token or not repo:
+        return False, "Missing GITHUB_TOKEN / GITHUB_REPO in this app's Secrets (Settings -> Secrets on Streamlit Cloud)."
+    try:
+        _git_run(["config", "user.email", "app@streamlit.local"])
+        _git_run(["config", "user.name", "Cricket Stats App"])
+        _git_run(["rm", "--cached", path])
+        commit = _git_run(["commit", "-m", message])
+        if commit.returncode != 0 and "nothing to commit" not in (commit.stdout + commit.stderr):
+            return False, commit.stderr or commit.stdout
+        remote_url = f"https://{token}@github.com/{repo}.git"
+        push = _git_run(["push", remote_url, f"HEAD:{branch}"])
+        if push.returncode != 0:
+            return False, push.stderr or push.stdout
+        return True, "Removed from GitHub and pushed. The app will redeploy shortly."
+    except Exception as e:
+        return False, str(e)
 
 # --- 1.5 CUSTOMIZABLE METRIC CONFIG ---
 # Instead of hardcoding Runs/Ave/SR (batting) and Wkts/Ave/Econ (bowling), the
@@ -270,8 +346,27 @@ if st.sidebar.button("🚀 Build DB"):
         st.sidebar.warning("Paste both links before building.")
 
 st.sidebar.divider()
+active_db_path = LOCAL_DB_FILE if st.session_state.active_dataset == "Local" else f"{st.session_state.active_dataset}.db"
+active_is_tracked = st.session_state.active_dataset == "Local" or (os.path.exists(active_db_path) and git_is_tracked(active_db_path))
+
+st.sidebar.caption("📌 Make the active dataset permanent (commits it to GitHub — survives sleeps/restarts forever, until deleted)")
+if st.session_state.active_dataset == "Local":
+    st.sidebar.caption("Local database is already permanent — it's already in the repo.")
+elif not os.path.exists(active_db_path):
+    st.sidebar.caption("Nothing built for the active dataset yet.")
+elif active_is_tracked:
+    st.sidebar.success(f"'{st.session_state.active_dataset}' is already permanent.")
+else:
+    if st.sidebar.button(f"📌 Make '{st.session_state.active_dataset}' Permanent"):
+        ok, msg = make_dataset_permanent(active_db_path, f"Add dataset: {st.session_state.active_dataset}")
+        (st.sidebar.success if ok else st.sidebar.error)(msg)
+
+st.sidebar.divider()
 st.sidebar.caption("Delete the currently active dataset")
 confirm_delete = st.sidebar.checkbox("Confirm delete", key="confirm_delete_active_dataset")
+also_remove_github = False
+if st.session_state.active_dataset != "Local" and active_is_tracked:
+    also_remove_github = st.sidebar.checkbox("Also remove permanently from GitHub (can't be undone)", key="also_remove_github")
 if st.sidebar.button("🗑️ Delete Active Dataset"):
     active = st.session_state.active_dataset
     if active == "Local":
@@ -280,8 +375,38 @@ if st.sidebar.button("🗑️ Delete Active Dataset"):
         st.sidebar.warning("Tick 'Confirm delete' first — this removes the file for every tab using it.")
     else:
         path = f"{active}.db"
+        if also_remove_github:
+            ok, msg = remove_dataset_permanently(path, f"Remove dataset: {active}")
+            if not ok:
+                st.sidebar.error(msg)
         if os.path.exists(path): os.remove(path)
         st.session_state.active_dataset = "Local"
+        st.rerun()
+
+st.sidebar.divider()
+st.sidebar.caption("💾 Download a local copy (works with or without GitHub secrets configured)")
+if os.path.exists(active_db_path):
+    with open(active_db_path, "rb") as _f:
+        st.sidebar.download_button(
+            f"⬇️ Download '{st.session_state.active_dataset}'",
+            data=_f.read(),
+            file_name=os.path.basename(active_db_path),
+            mime="application/octet-stream",
+        )
+else:
+    st.sidebar.caption("Nothing to download for the active dataset yet.")
+
+st.sidebar.divider()
+st.sidebar.caption("⬆️ Restore a dataset you downloaded earlier")
+uploaded_db = st.sidebar.file_uploader("Upload a .db file", type=["db"], key="dataset_uploader")
+if uploaded_db is not None:
+    default_upload_name = os.path.splitext(uploaded_db.name)[0]
+    upload_name_input = st.sidebar.text_input("Save as (dataset name)", value=default_upload_name, key="upload_name_input")
+    if st.sidebar.button("💾 Save Uploaded Dataset"):
+        safe_name = safe_dataset_name(upload_name_input)
+        with open(f"{safe_name}.db", "wb") as _f:
+            _f.write(uploaded_db.getbuffer())
+        st.session_state.active_dataset = safe_name
         st.rerun()
 
 # --- 5. AUTH ---
