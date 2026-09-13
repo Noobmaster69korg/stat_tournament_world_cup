@@ -602,11 +602,22 @@ elif st.session_state.nav_choice == "📈 Player Analytics":
     else:
         win = build_pairwise_sql(metrics, "A", "B", "win")
         loss = build_pairwise_sql(metrics, "A", "B", "loss")
-        q = f"SELECT A.Player, A.{t_col} as Year, (SELECT COUNT(*) FROM {disc}) as TR, (SELECT COUNT(*) FROM {disc} B WHERE {win} >= 2) as WC, (SELECT COUNT(*) FROM {disc} B WHERE {loss} >= 2) as LC FROM {disc} A"
+        # SP = how many seasons (rows) this player has in total, including this one -
+        # every one of those is excluded from the comparison pool, not just this exact row.
+        q = f"""
+            SELECT A.Player, A.{t_col} as Year,
+                   (SELECT COUNT(*) FROM {disc}) as TR,
+                   (SELECT COUNT(*) FROM {disc} B WHERE B.Player = A.Player) as SP,
+                   (SELECT COUNT(*) FROM {disc} B WHERE B.Player != A.Player AND {win} >= 2) as WC,
+                   (SELECT COUNT(*) FROM {disc} B WHERE B.Player != A.Player AND {loss} >= 2) as LC,
+                   (SELECT COUNT(*) FROM {disc} B WHERE B.Player != A.Player AND {loss} = 3) as LC3
+            FROM {disc} A
+        """
         df = pd.read_sql(q, conn)
-        df['Wins %'] = df.apply(lambda r: fmt(r['WC'], r['TR'] - 1), axis=1)
-        df['Losses'] = df.apply(lambda r: fmt(r['LC'], r['TR'] - 1), axis=1)
-        df['Ties'] = df.apply(lambda r: fmt(r['TR'] - r['WC'] - r['LC'] - 1, r['TR'] - 1), axis=1)
+        df['Others'] = df['TR'] - df['SP']  # comparison pool: every OTHER player's seasons
+        df['Wins %'] = df.apply(lambda r: fmt(r['WC'], r['Others']), axis=1)
+        df['Losses'] = df.apply(lambda r: f"{fmt(r['LC'], r['Others'])} ({int(r['LC3'])} 3-0)", axis=1)
+        df['Ties'] = df.apply(lambda r: fmt(r['Others'] - r['WC'] - r['LC'], r['Others']), axis=1)
         st.dataframe(df.sort_values("WC", ascending=False)[['Player', 'Year', 'Wins %', 'Losses', 'Ties']].reset_index(drop=True), use_container_width=True, hide_index=True)
 
 # --- TAB 4: DETAILS ---
@@ -793,4 +804,3 @@ elif st.session_state.nav_choice == "✏️ Edit Data":
 conn.close()
 if raw_conn is not conn:
     raw_conn.close()
-    
