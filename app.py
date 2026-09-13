@@ -293,11 +293,21 @@ def parse_auction_pdf_bytes(file_bytes):
     reader = PdfReader(io.BytesIO(file_bytes))
     text = "\n".join((p.extract_text() or "") for p in reader.pages)
     players = []
+    seq = 0
     for line in text.splitlines():
         line = line.strip()
+        if not line:
+            continue
         m = re.match(r"^(\d+)\s+(.+?)\s*$", line)
         if m:
             players.append((int(m.group(1)), m.group(2).strip()))
+        else:
+            # No leading order number on this line (e.g. a plain unnumbered
+            # name list) - fall back to treating it as a name and assigning
+            # order based on its position in the document, instead of
+            # silently dropping it.
+            seq += 1
+            players.append((seq, line))
     players.sort(key=lambda x: x[0])
     return players
 
