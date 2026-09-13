@@ -334,6 +334,13 @@ def fmt(count, total):
     perc = (count * 100.0 / total)
     return f"{int(count)} ({perc:.1f}%)"
 
+def pct(count, total):
+    """Like fmt(), but returns a plain float - use this for any column that
+    goes into an interactive st.dataframe, so clicking the header to sort
+    actually sorts numerically instead of alphabetically on a text string."""
+    if total <= 0: return 0.0
+    return round(count * 100.0 / total, 1)
+
 def get_profile_label(w, t, l):
     if w == 3: return "🏆 Beat all 3 categories"
     if w == 2 and t == 1: return "⭐ Beat 2 categories, Tied 1 category"
@@ -615,10 +622,15 @@ elif st.session_state.nav_choice == "📈 Player Analytics":
         """
         df = pd.read_sql(q, conn)
         df['Others'] = df['TR'] - df['SP']  # comparison pool: every OTHER player's seasons
-        df['Wins %'] = df.apply(lambda r: fmt(r['WC'], r['Others']), axis=1)
-        df['Losses'] = df.apply(lambda r: f"{fmt(r['LC'], r['Others'])} ({int(r['LC3'])} 3-0)", axis=1)
-        df['Ties'] = df.apply(lambda r: fmt(r['Others'] - r['WC'] - r['LC'], r['Others']), axis=1)
-        st.dataframe(df.sort_values("WC", ascending=False)[['Player', 'Year', 'Wins %', 'Losses', 'Ties']].reset_index(drop=True), use_container_width=True, hide_index=True)
+        df['Ties'] = df['Others'] - df['WC'] - df['LC']
+        df['Wins'] = df['WC']
+        df['Win %'] = df.apply(lambda r: pct(r['WC'], r['Others']), axis=1)
+        df['Losses'] = df['LC']
+        df['Loss %'] = df.apply(lambda r: pct(r['LC'], r['Others']), axis=1)
+        df['3-0 Losses'] = df['LC3']
+        df['Tie %'] = df.apply(lambda r: pct(r['Ties'], r['Others']), axis=1)
+        display_cols = ['Player', 'Year', 'Wins', 'Win %', 'Losses', 'Loss %', '3-0 Losses', 'Ties', 'Tie %']
+        st.dataframe(df.sort_values("Wins", ascending=False)[display_cols].reset_index(drop=True), use_container_width=True, hide_index=True)
 
 # --- TAB 4: DETAILS ---
 elif st.session_state.nav_choice == "👤 Player Details":
@@ -634,9 +646,12 @@ elif st.session_state.nav_choice == "👤 Player Details":
             df = pd.read_sql(q, conn)
             if not df.empty:
                 st.subheader(lab)
-                df['Wins %'] = df.apply(lambda r: fmt(r['WC'], r['TR'] - 1), axis=1)
-                df['Losses %'] = df.apply(lambda r: fmt(r['LC'], r['TR'] - 1), axis=1)
-                df['Ties %'] = df.apply(lambda r: fmt(r['TR'] - r['WC'] - r['LC'] - 1, r['TR'] - 1), axis=1)
+                df['Wins'] = df['WC']
+                df['Win %'] = df.apply(lambda r: pct(r['WC'], r['TR'] - 1), axis=1)
+                df['Losses'] = df['LC']
+                df['Loss %'] = df.apply(lambda r: pct(r['LC'], r['TR'] - 1), axis=1)
+                df['Ties'] = df['TR'] - df['WC'] - df['LC'] - 1
+                df['Tie %'] = df.apply(lambda r: pct(r['Ties'], r['TR'] - 1), axis=1)
                 evt = st.dataframe(df.drop(columns=['TR', 'WC', 'LC']), use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row", key=f"det_scr_{t}")
                 if evt.selection.rows:
                     sel = df.iloc[evt.selection.rows[0]]
@@ -712,18 +727,24 @@ elif st.session_state.nav_choice == "🏟️ Squad Comparison":
                 st.write("Squad A vs B")
                 q_a = f"SELECT A.Player, A.{t_col} as Year, (SELECT COUNT(*) FROM {t_disc} B WHERE B.Player IN {b_l}) as TR, (SELECT COUNT(*) FROM {t_disc} B WHERE B.Player IN {b_l} AND {win} >= 2) as WC, (SELECT COUNT(*) FROM {t_disc} B WHERE B.Player IN {b_l} AND {loss} >= 2) as LC FROM {t_disc} A WHERE A.Player IN {a_l}"
                 df_a = pd.read_sql(q_a, conn)
-                df_a['Wins'] = df_a.apply(lambda r: fmt(r['WC'], r['TR']), axis=1)
-                df_a['Losses'] = df_a.apply(lambda r: fmt(r['LC'], r['TR']), axis=1)
-                df_a['Ties'] = df_a.apply(lambda r: fmt(r['TR'] - r['WC'] - r['LC'], r['TR']), axis=1)
-                st.dataframe(df_a[['Player', 'Year', 'Wins', 'Losses', 'Ties']], hide_index=True)
+                df_a['Wins'] = df_a['WC']
+                df_a['Win %'] = df_a.apply(lambda r: pct(r['WC'], r['TR']), axis=1)
+                df_a['Losses'] = df_a['LC']
+                df_a['Loss %'] = df_a.apply(lambda r: pct(r['LC'], r['TR']), axis=1)
+                df_a['Ties'] = df_a['TR'] - df_a['WC'] - df_a['LC']
+                df_a['Tie %'] = df_a.apply(lambda r: pct(r['Ties'], r['TR']), axis=1)
+                st.dataframe(df_a[['Player', 'Year', 'Wins', 'Win %', 'Losses', 'Loss %', 'Ties', 'Tie %']], hide_index=True)
             with c2:
                 st.write("Squad B vs A")
                 q_b = f"SELECT A.Player, A.{t_col} as Year, (SELECT COUNT(*) FROM {t_disc} B WHERE B.Player IN {a_l}) as TR, (SELECT COUNT(*) FROM {t_disc} B WHERE B.Player IN {a_l} AND {win} >= 2) as WC, (SELECT COUNT(*) FROM {t_disc} B WHERE B.Player IN {a_l} AND {loss} >= 2) as LC FROM {t_disc} A WHERE A.Player IN {b_l}"
                 df_b = pd.read_sql(q_b, conn)
-                df_b['Wins'] = df_b.apply(lambda r: fmt(r['WC'], r['TR']), axis=1)
-                df_b['Losses'] = df_b.apply(lambda r: fmt(r['LC'], r['TR']), axis=1)
-                df_b['Ties'] = df_b.apply(lambda r: fmt(r['TR'] - r['WC'] - r['LC'], r['TR']), axis=1)
-                st.dataframe(df_b[['Player', 'Year', 'Wins', 'Losses', 'Ties']], hide_index=True)
+                df_b['Wins'] = df_b['WC']
+                df_b['Win %'] = df_b.apply(lambda r: pct(r['WC'], r['TR']), axis=1)
+                df_b['Losses'] = df_b['LC']
+                df_b['Loss %'] = df_b.apply(lambda r: pct(r['LC'], r['TR']), axis=1)
+                df_b['Ties'] = df_b['TR'] - df_b['WC'] - df_b['LC']
+                df_b['Tie %'] = df_b.apply(lambda r: pct(r['Ties'], r['TR']), axis=1)
+                st.dataframe(df_b[['Player', 'Year', 'Wins', 'Win %', 'Losses', 'Loss %', 'Ties', 'Tie %']], hide_index=True)
 
 # --- TAB 6: FORMAT ANALYSIS ---
 elif st.session_state.nav_choice == "🧬 Format Analysis":
