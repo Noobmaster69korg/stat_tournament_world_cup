@@ -10,6 +10,7 @@ import io
 import glob
 import subprocess
 import re
+from pypdf import PdfReader
 
 # --- 1. DATABASE & CONNECTION MANAGER ---
 # Scraped datasets are now named (one .db file per name) instead of a single
@@ -283,6 +284,142 @@ def build_filtered_connection(raw_conn, t_col, year_range, countries):
     bowl_df.to_sql("bowling", mem_conn, index=False)
     return mem_conn
 
+# --- 1.7 AUCTION SHEET HELPERS ---
+# Takes an auction-order PDF (numbered list of player names) plus one or more
+# format's batting/bowling "Global Rankings" CSVs (Player, Year, Wins %,
+# Losses, Ties), and produces one row per auction player with loss-threshold
+# counts and a best-year rank for every format/discipline combination included.
+def parse_auction_pdf_bytes(file_bytes):
+    reader = PdfReader(io.BytesIO(file_bytes))
+    text = "\n".join((p.extract_text() or "") for p in reader.pages)
+    players = []
+    for line in text.splitlines():
+        line = line.strip()
+        m = re.match(r"^(\d+)\s+(.+?)\s*$", line)
+        if m:
+            players.append((int(m.group(1)), m.group(2).strip()))
+    players.sort(key=lambda x: x[0])
+    return players
+
+# Name matching: CSVs carry a trailing country code (e.g. "SL Malinga SL"),
+# auction names don't. We match on surname + given-name initials, with an
+# explicit confidence tier - anything not a unique, full-initials match gets
+# flagged for manual review rather than silently trusted (a first-initial-only
+# match once produced a genuine false positive: "Shaheen Shah Afridi" ->
+# "Shahid Afridi" - so that tier is always labeled, never called "exact").
+_NAME_PREFIXES = {"de", "van", "der", "al", "bin", "du", "le"}
+
+def _split_name(name):
+    tokens = [t for t in re.sub(r"[^\w\s'\-]", "", name).split() if t]
+    if not tokens:
+        return None
+    surname_tokens = [tokens[-1]]
+    i = len(tokens) - 2
+    while i >= 0 and tokens[i].lower() in _NAME_PREFIXES:
+        surname_tokens.insert(0, tokens[i])
+        i -= 1
+    surname = " ".join(surname_tokens).lower()
+    given = tokens[: len(tokens) - len(surname_tokens)]
+    initials = "".join(g[0].lower() for g in given)
+    return surname, initials
+
+def _build_name_index(player_series):
+    by_full, by_surname_firstinit, by_surname = {}, {}, {}
+    for full in player_series.dropna().unique():
+        tokens = str(full).split()
+        core = " ".join(tokens[:-1]) if len(tokens) > 1 else full  # strip trailing country code
+        parsed = _split_name(core)
+        if parsed is None:
+            continue
+        surname, initials = parsed
+        by_full.setdefault((surname, initials), []).append(full)
+        if initials:
+            by_surname_firstinit.setdefault((surname, initials[0]), []).append(full)
+        by_surname.setdefault(surname, []).append(full)
+    return by_full, by_surname_firstinit, by_surname
+
+def _match_player(auction_name, idx):
+    by_full, by_sfi, by_s = idx
+    parsed = _split_name(auction_name)
+    if parsed is None:
+        return None, "no_match"
+    surname, initials = parsed
+    cands = by_full.get((surname, initials), [])
+    if len(cands) == 1: return cands[0], "exact"
+    if len(cands) > 1: return cands[0], "ambiguous"
+    cands2 = by_sfi.get((surname, initials[0] if initials else ""), [])
+    if len(cands2) == 1: return cands2[0], "weak"
+    if len(cands2) > 1: return cands2[0], "ambiguous"
+    cands3 = by_s.get(surname, [])
+    if len(cands3) == 1: return cands3[0], "weak"
+    if len(cands3) > 1: return cands3[0], "ambiguous"
+    return None, "no_match"
+
+def _parse_raw_loss(loss_str):
+    m = re.match(r"\s*(\d+)", str(loss_str))
+    return int(m.group(1)) if m else None
+
+def _player_loss_stats(matched_name, df, thresholds):
+    rows = df[df['Player'] == matched_name].copy()
+    if rows.empty:
+        return None
+    rows['_raw_loss'] = rows['Losses'].apply(_parse_raw_loss)
+    rows = rows.dropna(subset=['_raw_loss'])
+    if rows.empty:
+        return None
+    out = {f"<{th}": int((rows['_raw_loss'] < th).sum()) for th in thresholds}
+    best_idx = rows['_raw_loss'].idxmin()
+    best_row = rows.loc[best_idx]
+    out['best_year'] = best_row['Year']
+    out['best_year_losses'] = int(best_row['_raw_loss'])
+    all_raw = df['Losses'].apply(_parse_raw_loss).dropna()
+    out['rank'] = int((all_raw < out['best_year_losses']).sum()) + 1  # competition ranking - lower losses = better rank
+    out['total_n'] = int(all_raw.shape[0])
+    return out
+
+def build_auction_sheet(pdf_bytes, formats_config, thresholds):
+    """formats_config: {format_name: {'bat': csv_fileobj, 'bowl': csv_fileobj}}"""
+    auction_players = parse_auction_pdf_bytes(pdf_bytes)
+    loaded = {}
+    for fmt_name, cfg in formats_config.items():
+        for disc in ("bat", "bowl"):
+            src = cfg[disc]
+            src.seek(0)
+            df = pd.read_csv(src)
+            df.columns = [c.strip() for c in df.columns]
+            loaded[(fmt_name, disc)] = (df, _build_name_index(df['Player']))
+
+    rows, warnings = [], []
+    for order, name in auction_players:
+        row = {"Auction Order": order, "Auction Player": name}
+        notes = []
+        for fmt_name in formats_config:
+            for disc, disc_label in (("bat", "Bat"), ("bowl", "Bowl")):
+                df, idx = loaded[(fmt_name, disc)]
+                prefix = f"{fmt_name} {disc_label}"
+                matched, status = _match_player(name, idx)
+                stats = _player_loss_stats(matched, df, thresholds) if matched else None
+                if stats is None:
+                    for th in thresholds:
+                        row[f"{prefix} <{th}"] = None
+                    row[f"{prefix} Best Year"] = None
+                    row[f"{prefix} Best Year Losses"] = None
+                    row[f"{prefix} Rank"] = None
+                else:
+                    for th in thresholds:
+                        row[f"{prefix} <{th}"] = stats[f"<{th}"]
+                    row[f"{prefix} Best Year"] = stats['best_year']
+                    row[f"{prefix} Best Year Losses"] = stats['best_year_losses']
+                    row[f"{prefix} Rank"] = f"{stats['rank']} of {stats['total_n']}"
+                    if status != "exact":
+                        notes.append(f"{prefix}: matched '{matched}' ({status}, please verify)")
+        row["Match Notes"] = "; ".join(notes)
+        if notes:
+            warnings.append(f"#{order} {name}: {row['Match Notes']}")
+        rows.append(row)
+    return pd.DataFrame(rows), warnings
+
+
 # --- 2. ROBUST PAGINATED SCRAPER (Always creates 'Year' column) ---
 def scrape_full_cricinfo(base_url, discipline):
     all_data = []
@@ -533,7 +670,7 @@ with st.expander("🎯 Filter This Dataset (Year Range & Countries)", expanded=F
 if not _year_nums.empty:
     conn = build_filtered_connection(raw_conn, t_col, year_range, selected_countries)
 
-nav_options = ["Batting Milestones", "Bowling Milestones", "📈 Player Analytics", "👤 Player Details", "🏟️ Squad Comparison", "🧬 Format Analysis", "✏️ Edit Data"]
+nav_options = ["Batting Milestones", "Bowling Milestones", "📈 Player Analytics", "👤 Player Details", "🏟️ Squad Comparison", "🧬 Format Analysis", "✏️ Edit Data", "🏆 Auction Sheet"]
 st.session_state.nav_choice = st.radio("Navigate:", nav_options, index=nav_options.index(st.session_state.nav_choice), horizontal=True)
 st.divider()
 
@@ -821,6 +958,72 @@ elif st.session_state.nav_choice == "✏️ Edit Data":
         full_df.to_sql(edit_table, raw_conn, index=False, if_exists='replace')
         st.success(f"Saved changes to '{edit_table}' in '{st.session_state.active_dataset}'.")
         st.rerun()
+
+# --- TAB 8: AUCTION SHEET ---
+elif st.session_state.nav_choice == "🏆 Auction Sheet":
+    st.caption(
+        "Upload an auction-order PDF and the Global Rankings CSVs (Player, Year, Wins %, Losses, Ties) "
+        "for whichever formats apply to this tournament. Output is ordered exactly like your auction list, "
+        "with separate batting/bowling loss-threshold counts and a best-year rank per format."
+    )
+
+    THRESHOLDS = [5, 10, 20, 30, 40, 50]
+    pdf_file = st.file_uploader("Auction Order PDF", type=["pdf"], key="auction_pdf")
+
+    formats_config = {}
+    for fmt_name in ["Test", "ODI", "T20I"]:
+        include = st.checkbox(f"Include {fmt_name}", key=f"include_{fmt_name}")
+        if include:
+            c1, c2 = st.columns(2)
+            bat_file = c1.file_uploader(f"{fmt_name} Batting CSV", type=["csv"], key=f"{fmt_name}_bat_csv")
+            bowl_file = c2.file_uploader(f"{fmt_name} Bowling CSV", type=["csv"], key=f"{fmt_name}_bowl_csv")
+            formats_config[fmt_name] = {"bat": bat_file, "bowl": bowl_file}
+
+    if st.button("🚀 Generate Auction Sheet"):
+        if not pdf_file:
+            st.error("Upload the auction PDF first.")
+        elif not formats_config:
+            st.error("Include at least one format.")
+        else:
+            missing = [f for f, cfg in formats_config.items() if cfg['bat'] is None or cfg['bowl'] is None]
+            if missing:
+                st.error(f"Missing a batting or bowling CSV for: {', '.join(missing)}")
+            else:
+                with st.spinner("Matching players and building the sheet..."):
+                    result_df, warnings = build_auction_sheet(pdf_file.read(), formats_config, THRESHOLDS)
+                st.success(f"Built the sheet for {len(result_df)} players.")
+                if warnings:
+                    with st.expander(f"⚠️ {len(warnings)} players need manual review (uncertain name match)"):
+                        for w in warnings:
+                            st.write(f"- {w}")
+
+                buf = io.BytesIO()
+                with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                    result_df.to_excel(writer, index=False, sheet_name="Auction Sheet")
+                    ws = writer.sheets["Auction Sheet"]
+                    from openpyxl.styles import Font, PatternFill, Alignment
+                    from openpyxl.utils import get_column_letter
+                    header_font = Font(name="Arial", bold=True, color="FFFFFF")
+                    header_fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
+                    body_font = Font(name="Arial", size=10)
+                    for col_idx, col_name in enumerate(result_df.columns, start=1):
+                        cell = ws.cell(row=1, column=col_idx)
+                        cell.font = header_font
+                        cell.fill = header_fill
+                        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                        ws.column_dimensions[get_column_letter(col_idx)].width = min(max(len(str(col_name)) + 2, 10), 22)
+                    for row in ws.iter_rows(min_row=2, max_row=ws.max_row):
+                        for cell in row:
+                            cell.font = body_font
+                    ws.freeze_panes = "C2"
+                    ws.row_dimensions[1].height = 30
+
+                st.download_button(
+                    "⬇️ Download Auction Sheet (.xlsx)", data=buf.getvalue(),
+                    file_name="auction_sheet.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+                st.dataframe(result_df, use_container_width=True, hide_index=True)
 
 conn.close()
 if raw_conn is not conn:
