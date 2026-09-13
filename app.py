@@ -355,7 +355,7 @@ def display_styled_results(df, title_prefix):
         if 'WinsB' in df.columns: cols_to_drop.append('WinsB')
         if 'TiesB' in df.columns: cols_to_drop.append('TiesB')
         st.markdown(f"#### {profile}")
-        st.dataframe(df[df['Result_Profile'] == profile].drop(columns=cols_to_drop), use_container_width=True, hide_index=True)
+        st.dataframe(df[df['Result_Profile'] == profile].drop(columns=cols_to_drop).reset_index(drop=True), use_container_width=True, hide_index=True)
 
 # --- 4. SIDEBAR CONFIG ---
 st.sidebar.title("🌐 Live Data Bridge")
@@ -598,7 +598,7 @@ elif st.session_state.nav_choice == "📈 Player Analytics":
         q = f"SELECT Player, COUNT(*) as Total, SUM(CASE WHEN ({meets_sql}) >= 2 THEN 1 ELSE 0 END) as Successful FROM {disc} GROUP BY Player HAVING Successful > 0"
         df = pd.read_sql(q, conn)
         df['Win %'] = (df['Successful'] * 100 / df['Total']).round(2)
-        st.dataframe(df.sort_values("Win %", ascending=False), use_container_width=True, hide_index=True)
+        st.dataframe(df.sort_values("Win %", ascending=False).reset_index(drop=True), use_container_width=True, hide_index=True)
     else:
         win = build_pairwise_sql(metrics, "A", "B", "win")
         loss = build_pairwise_sql(metrics, "A", "B", "loss")
@@ -607,7 +607,7 @@ elif st.session_state.nav_choice == "📈 Player Analytics":
         df['Wins %'] = df.apply(lambda r: fmt(r['WC'], r['TR'] - 1), axis=1)
         df['Losses'] = df.apply(lambda r: fmt(r['LC'], r['TR'] - 1), axis=1)
         df['Ties'] = df.apply(lambda r: fmt(r['TR'] - r['WC'] - r['LC'] - 1, r['TR'] - 1), axis=1)
-        st.dataframe(df.sort_values("WC", ascending=False)[['Player', 'Year', 'Wins %', 'Losses', 'Ties']], use_container_width=True, hide_index=True)
+        st.dataframe(df.sort_values("WC", ascending=False)[['Player', 'Year', 'Wins %', 'Losses', 'Ties']].reset_index(drop=True), use_container_width=True, hide_index=True)
 
 # --- TAB 4: DETAILS ---
 elif st.session_state.nav_choice == "👤 Player Details":
@@ -760,7 +760,7 @@ elif st.session_state.nav_choice == "🧬 Format Analysis":
                             if compare_rows(rx, rp, metrics) < 2: pb = False; break
                         if not pb: e = False; break
                     if e: kl.append(rx)
-                if kl: st.dataframe(pd.DataFrame(kl).rename(columns={t_col: 'Year'}), hide_index=True)
+                if kl: st.dataframe(pd.DataFrame(kl).rename(columns={t_col: 'Year'}).reset_index(drop=True), hide_index=True)
                 else: st.error("No killers.")
 
 # --- TAB 7: EDIT DATA ---
@@ -793,3 +793,4 @@ elif st.session_state.nav_choice == "✏️ Edit Data":
 conn.close()
 if raw_conn is not conn:
     raw_conn.close()
+    
