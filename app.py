@@ -408,9 +408,14 @@ def _player_loss_stats(matched_name, df, thresholds):
     out['total_n'] = int(all_raw.shape[0])
     return out
 
-def build_auction_sheet(order_bytes, order_filename, formats_config, thresholds):
-    """formats_config: {format_name: {'bat': csv_fileobj, 'bowl': csv_fileobj}}"""
-    auction_players = parse_auction_order_bytes(order_bytes, order_filename)
+AUCTION_KEEP_AUTO = "↩️ Keep automatic match"
+AUCTION_EXCLUDE = "❌ Exclude (no match)"
+
+def _load_format_dataframes(formats_config):
+    """Reads each configured format's batting/bowling CSVs into DataFrames,
+    keyed by (format_name, 'bat'/'bowl'). Cached in session_state after the
+    initial build so manual corrections below don't depend on the uploaded
+    file widgets still holding their content."""
     loaded = {}
     for fmt_name, cfg in formats_config.items():
         for disc in ("bat", "bowl"):
@@ -418,17 +423,49 @@ def build_auction_sheet(order_bytes, order_filename, formats_config, thresholds)
             src.seek(0)
             df = pd.read_csv(src)
             df.columns = [c.strip() for c in df.columns]
-            loaded[(fmt_name, disc)] = (df, _build_name_index(df['Player']))
+            loaded[(fmt_name, disc)] = df
+    return loaded
 
+def _auto_match_records(auction_players, loaded):
+    """One automatic name-match attempt per (auction player, format,
+    discipline) cell - the starting point before any manual corrections."""
+    indices = {key: _build_name_index(df['Player']) for key, df in loaded.items()}
+    records = {}
+    for order, name in auction_players:
+        for fmt_name, disc in loaded:
+            matched, status = _match_player(name, indices[(fmt_name, disc)])
+            records[(order, fmt_name, disc)] = {
+                "order": order, "auction_player": name,
+                "format": fmt_name, "disc": disc,
+                "matched_name": matched, "status": status,
+            }
+    return records
+
+def _resolve_match(order, fmt_name, disc, auto_records, overrides):
+    """The EFFECTIVE match for a cell: a manual override if the user set one,
+    otherwise the automatic match. Returns (matched_name_or_None, status)."""
+    key = (order, fmt_name, disc)
+    if key in overrides:
+        chosen = overrides[key]
+        if chosen == AUCTION_EXCLUDE:
+            return None, "manually_excluded"
+        return chosen, "manual"
+    rec = auto_records[key]
+    return rec["matched_name"], rec["status"]
+
+def build_auction_sheet_df(auction_players, format_names, loaded, auto_records, overrides, thresholds):
+    """Builds the result DataFrame + a list of human-readable warning strings,
+    applying any manual corrections (overrides) on top of the automatic
+    name matches."""
     rows, warnings = [], []
     for order, name in auction_players:
         row = {"Auction Order": order, "Auction Player": name}
         notes = []
-        for fmt_name in formats_config:
+        for fmt_name in format_names:
             for disc, disc_label in (("bat", "Bat"), ("bowl", "Bowl")):
-                df, idx = loaded[(fmt_name, disc)]
+                df = loaded[(fmt_name, disc)]
                 prefix = f"{fmt_name} {disc_label}"
-                matched, status = _match_player(name, idx)
+                matched, status = _resolve_match(order, fmt_name, disc, auto_records, overrides)
                 stats = _player_loss_stats(matched, df, thresholds) if matched else None
                 if stats is None:
                     for th in thresholds:
@@ -442,13 +479,18 @@ def build_auction_sheet(order_bytes, order_filename, formats_config, thresholds)
                     row[f"{prefix} Best Year"] = stats['best_year']
                     row[f"{prefix} Best Year Losses"] = stats['best_year_losses']
                     row[f"{prefix} Rank"] = f"{stats['rank']} of {stats['total_n']}"
-                    if status != "exact":
-                        notes.append(f"{prefix}: matched '{matched}' ({status}, please verify)")
+                if status == "manual":
+                    notes.append(f"{prefix}: manually corrected to '{matched}'")
+                elif status == "manually_excluded":
+                    notes.append(f"{prefix}: manually excluded (no match)")
+                elif status != "exact":
+                    notes.append(f"{prefix}: matched '{matched}' ({status}, please verify)")
         row["Match Notes"] = "; ".join(notes)
         if notes:
             warnings.append(f"#{order} {name}: {row['Match Notes']}")
         rows.append(row)
     return pd.DataFrame(rows), warnings
+
 
 
 # --- 2. ROBUST PAGINATED SCRAPER (Always creates 'Year' column) ---
@@ -1017,7 +1059,7 @@ elif st.session_state.nav_choice == "🏆 Auction Sheet":
 
     if st.button("🚀 Generate Auction Sheet"):
         if not pdf_file:
-            st.error("Upload the auction PDF first.")
+            st.error("Upload the auction order file first.")
         elif not formats_config:
             st.error("Include at least one format.")
         else:
@@ -1026,40 +1068,104 @@ elif st.session_state.nav_choice == "🏆 Auction Sheet":
                 st.error(f"Missing a batting or bowling CSV for: {', '.join(missing)}")
             else:
                 with st.spinner("Matching players and building the sheet..."):
-                    result_df, warnings = build_auction_sheet(pdf_file.read(), pdf_file.name, formats_config, THRESHOLDS)
-                st.success(f"Built the sheet for {len(result_df)} players.")
-                if warnings:
-                    with st.expander(f"⚠️ {len(warnings)} players need manual review (uncertain name match)"):
-                        for w in warnings:
-                            st.write(f"- {w}")
+                    auction_players = parse_auction_order_bytes(pdf_file.read(), pdf_file.name)
+                    loaded = _load_format_dataframes(formats_config)
+                    auto_records = _auto_match_records(auction_players, loaded)
+                # Stashed in session_state so the manual-correction controls below
+                # can rebuild the sheet on every tweak without needing the original
+                # file uploads to still be present, and survive the reruns that
+                # each correction dropdown triggers.
+                st.session_state.auction_players = auction_players
+                st.session_state.auction_loaded = loaded
+                st.session_state.auction_auto_records = auto_records
+                st.session_state.auction_format_names = list(formats_config.keys())
+                st.session_state.auction_thresholds = THRESHOLDS
+                st.session_state.auction_overrides = {}  # fresh generate clears prior corrections
 
-                buf = io.BytesIO()
-                with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-                    result_df.to_excel(writer, index=False, sheet_name="Auction Sheet")
-                    ws = writer.sheets["Auction Sheet"]
-                    from openpyxl.styles import Font, PatternFill, Alignment
-                    from openpyxl.utils import get_column_letter
-                    header_font = Font(name="Arial", bold=True, color="FFFFFF")
-                    header_fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
-                    body_font = Font(name="Arial", size=10)
-                    for col_idx, col_name in enumerate(result_df.columns, start=1):
-                        cell = ws.cell(row=1, column=col_idx)
-                        cell.font = header_font
-                        cell.fill = header_fill
-                        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-                        ws.column_dimensions[get_column_letter(col_idx)].width = min(max(len(str(col_name)) + 2, 10), 22)
-                    for row in ws.iter_rows(min_row=2, max_row=ws.max_row):
-                        for cell in row:
-                            cell.font = body_font
-                    ws.freeze_panes = "C2"
-                    ws.row_dimensions[1].height = 30
+    if st.session_state.get("auction_players"):
+        auction_players = st.session_state.auction_players
+        loaded = st.session_state.auction_loaded
+        auto_records = st.session_state.auction_auto_records
+        format_names = st.session_state.auction_format_names
+        thresholds = st.session_state.auction_thresholds
+        overrides = st.session_state.setdefault("auction_overrides", {})
 
-                st.download_button(
-                    "⬇️ Download Auction Sheet (.xlsx)", data=buf.getvalue(),
-                    file_name="auction_sheet.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        # Cells that were EVER flagged by the automatic matcher (ambiguous, weak,
+        # or no match at all) - these are the ones worth showing a corrector for,
+        # even after a manual fix has already been applied to them.
+        flagged_keys = sorted(k for k, r in auto_records.items() if r["status"] != "exact")
+
+        if flagged_keys:
+            with st.expander(f"⚠️ {len(flagged_keys)} match(es) need review", expanded=True):
+                st.caption(
+                    "Pick the correct player for any flagged cell below. The sheet and Excel file "
+                    "below update immediately - no extra step needed."
                 )
-                st.dataframe(result_df, use_container_width=True, hide_index=True)
+                for order, fmt_name, disc in flagged_keys:
+                    rec = auto_records[(order, fmt_name, disc)]
+                    disc_label = "Bat" if disc == "bat" else "Bowl"
+                    df = loaded[(fmt_name, disc)]
+                    all_names = sorted(df['Player'].dropna().unique().tolist())
+                    options = [AUCTION_KEEP_AUTO] + all_names + [AUCTION_EXCLUDE]
+
+                    current_override = overrides.get((order, fmt_name, disc))
+                    if current_override is None:
+                        default_label = AUCTION_KEEP_AUTO
+                    else:
+                        default_label = current_override
+                    default_index = options.index(default_label) if default_label in options else 0
+
+                    auto_desc = (
+                        f"auto-matched to '{rec['matched_name']}' ({rec['status']}, please verify)"
+                        if rec['matched_name'] else "no automatic match found"
+                    )
+                    st.markdown(f"**#{order} {rec['auction_player']} — {fmt_name} {disc_label}** _({auto_desc})_")
+                    choice = st.selectbox(
+                        "Correct player", options, index=default_index,
+                        key=f"auction_override_{order}_{fmt_name}_{disc}",
+                        label_visibility="collapsed",
+                    )
+                    if choice == AUCTION_KEEP_AUTO:
+                        overrides.pop((order, fmt_name, disc), None)
+                    else:
+                        overrides[(order, fmt_name, disc)] = choice
+                    st.divider()
+
+                if overrides and st.button("↩️ Reset All Corrections"):
+                    st.session_state.auction_overrides = {}
+                    st.rerun()
+
+        result_df, warnings = build_auction_sheet_df(auction_players, format_names, loaded, auto_records, overrides, thresholds)
+        st.success(f"Built the sheet for {len(result_df)} players" + (f" ({len(overrides)} manually corrected)." if overrides else "."))
+
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+            result_df.to_excel(writer, index=False, sheet_name="Auction Sheet")
+            ws = writer.sheets["Auction Sheet"]
+            from openpyxl.styles import Font, PatternFill, Alignment
+            from openpyxl.utils import get_column_letter
+            header_font = Font(name="Arial", bold=True, color="FFFFFF")
+            header_fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
+            body_font = Font(name="Arial", size=10)
+            for col_idx, col_name in enumerate(result_df.columns, start=1):
+                cell = ws.cell(row=1, column=col_idx)
+                cell.font = header_font
+                cell.fill = header_fill
+                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                ws.column_dimensions[get_column_letter(col_idx)].width = min(max(len(str(col_name)) + 2, 10), 22)
+            for row in ws.iter_rows(min_row=2, max_row=ws.max_row):
+                for cell in row:
+                    cell.font = body_font
+            ws.freeze_panes = "C2"
+            ws.row_dimensions[1].height = 30
+
+        st.download_button(
+            "⬇️ Download Auction Sheet (.xlsx)", data=buf.getvalue(),
+            file_name="auction_sheet.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="auction_download",
+        )
+        st.dataframe(result_df, use_container_width=True, hide_index=True)
 
 conn.close()
 if raw_conn is not conn:
