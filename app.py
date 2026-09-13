@@ -453,10 +453,43 @@ def _resolve_match(order, fmt_name, disc, auto_records, overrides):
     rec = auto_records[key]
     return rec["matched_name"], rec["status"]
 
+def _resolve_all(auction_players, format_names, auto_records, overrides):
+    """Resolves every (auction player, format, discipline) cell, and tallies
+    - per auction player - how many of those cells resolved to a genuinely
+    identified player (an exact match, or a manually confirmed one)."""
+    resolved = {}
+    confirmed_counts = {}
+    for order, name in auction_players:
+        confirmed_counts.setdefault(order, 0)
+        for fmt_name in format_names:
+            for disc in ("bat", "bowl"):
+                matched, status = _resolve_match(order, fmt_name, disc, auto_records, overrides)
+                resolved[(order, fmt_name, disc)] = (matched, status)
+                if status in ("exact", "manual"):
+                    confirmed_counts[order] += 1
+    return resolved, confirmed_counts
+
+def _needs_review(status, order, confirmed_counts):
+    """Whether a cell's match is worth flagging for a human to check.
+    - Ambiguous/weak matches always are: there IS a row there, just an
+      uncertain one.
+    - A 'no match found' is only worth flagging if this player wasn't
+      identified in ANY format/discipline at all. If they were found
+      elsewhere, a no-match here almost always just means they have no
+      eligible years/appearances in that particular format or discipline
+      (e.g. a specialist batter absent from the bowling sheet) - not a
+      real data problem."""
+    if status in ("weak", "ambiguous"):
+        return True
+    if status == "no_match":
+        return confirmed_counts.get(order, 0) == 0
+    return False
+
 def build_auction_sheet_df(auction_players, format_names, loaded, auto_records, overrides, thresholds):
     """Builds the result DataFrame + a list of human-readable warning strings,
     applying any manual corrections (overrides) on top of the automatic
     name matches."""
+    resolved, confirmed_counts = _resolve_all(auction_players, format_names, auto_records, overrides)
     rows, warnings = [], []
     for order, name in auction_players:
         row = {"Auction Order": order, "Auction Player": name}
@@ -465,7 +498,7 @@ def build_auction_sheet_df(auction_players, format_names, loaded, auto_records, 
             for disc, disc_label in (("bat", "Bat"), ("bowl", "Bowl")):
                 df = loaded[(fmt_name, disc)]
                 prefix = f"{fmt_name} {disc_label}"
-                matched, status = _resolve_match(order, fmt_name, disc, auto_records, overrides)
+                matched, status = resolved[(order, fmt_name, disc)]
                 stats = _player_loss_stats(matched, df, thresholds) if matched else None
                 if stats is None:
                     for th in thresholds:
@@ -483,6 +516,11 @@ def build_auction_sheet_df(auction_players, format_names, loaded, auto_records, 
                     notes.append(f"{prefix}: manually corrected to '{matched}'")
                 elif status == "manually_excluded":
                     notes.append(f"{prefix}: manually excluded (no match)")
+                elif status == "no_match":
+                    if _needs_review(status, order, confirmed_counts):
+                        notes.append(f"{prefix}: no match found, please verify")
+                    # else: found in another format/discipline already - most likely
+                    # this player simply has no eligible years here, not worth a note.
                 elif status != "exact":
                     notes.append(f"{prefix}: matched '{matched}' ({status}, please verify)")
         row["Match Notes"] = "; ".join(notes)
@@ -1090,10 +1128,15 @@ elif st.session_state.nav_choice == "🏆 Auction Sheet":
         thresholds = st.session_state.auction_thresholds
         overrides = st.session_state.setdefault("auction_overrides", {})
 
-        # Cells that were EVER flagged by the automatic matcher (ambiguous, weak,
-        # or no match at all) - these are the ones worth showing a corrector for,
-        # even after a manual fix has already been applied to them.
-        flagged_keys = sorted(k for k, r in auto_records.items() if r["status"] != "exact")
+        # Cells worth showing a corrector for: ambiguous/weak matches always,
+        # plus any "no match found" case where this player wasn't identified
+        # in ANY format/discipline (see _needs_review for why a no-match
+        # elsewhere-confirmed player is skipped).
+        resolved_snapshot, confirmed_counts = _resolve_all(auction_players, format_names, auto_records, overrides)
+        flagged_keys = sorted(
+            key for key, (matched, status) in resolved_snapshot.items()
+            if _needs_review(status, key[0], confirmed_counts)
+        )
 
         if flagged_keys:
             with st.expander(f"⚠️ {len(flagged_keys)} match(es) need review", expanded=True):
