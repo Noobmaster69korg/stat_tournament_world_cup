@@ -526,7 +526,7 @@ with st.expander("🎯 Filter This Dataset (Year Range & Countries)", expanded=F
 if not _year_nums.empty:
     conn = build_filtered_connection(raw_conn, t_col, year_range, selected_countries)
 
-nav_options = ["Batting Milestones", "Bowling Milestones", "📈 Player Analytics", "👤 Player Details", "🏟️ Squad Comparison", "🧬 Format Analysis"]
+nav_options = ["Batting Milestones", "Bowling Milestones", "📈 Player Analytics", "👤 Player Details", "🏟️ Squad Comparison", "🧬 Format Analysis", "✏️ Edit Data"]
 st.session_state.nav_choice = st.radio("Navigate:", nav_options, index=nav_options.index(st.session_state.nav_choice), horizontal=True)
 st.divider()
 
@@ -762,6 +762,33 @@ elif st.session_state.nav_choice == "🧬 Format Analysis":
                     if e: kl.append(rx)
                 if kl: st.dataframe(pd.DataFrame(kl).rename(columns={t_col: 'Year'}), hide_index=True)
                 else: st.error("No killers.")
+
+# --- TAB 7: EDIT DATA ---
+elif st.session_state.nav_choice == "✏️ Edit Data":
+    st.caption(
+        f"Editing '{st.session_state.active_dataset}' directly. Changes save to that dataset's file immediately — "
+        "if you want them to survive a restart/redeploy, use '📌 Make Permanent' in the sidebar afterwards."
+    )
+    edit_table = st.radio("Table:", ["Batting", "Bowling"], horizontal=True, key="edit_table_choice").lower()
+
+    # Edits always target the RAW file connection, never the year/country-filtered
+    # in-memory one — otherwise saves would vanish on the next rerun.
+    full_df = pd.read_sql(f"SELECT * FROM {edit_table}", raw_conn)
+    search = st.text_input("Search player (optional — narrows what's shown/edited, doesn't affect the rest of the data)", key="edit_search")
+    display_df = full_df[full_df['Player'].str.contains(search, case=False, na=False)] if search else full_df
+    st.caption(f"Showing {len(display_df)} of {len(full_df)} total rows.")
+
+    edited_df = st.data_editor(
+        display_df, use_container_width=True, hide_index=True,
+        num_rows="fixed",  # editing existing values only — add/remove rows not yet supported here
+        key=f"data_editor_{edit_table}_{st.session_state.active_dataset}",
+    )
+
+    if st.button("💾 Save Changes", key=f"save_edit_{edit_table}"):
+        full_df.loc[edited_df.index] = edited_df
+        full_df.to_sql(edit_table, raw_conn, index=False, if_exists='replace')
+        st.success(f"Saved changes to '{edit_table}' in '{st.session_state.active_dataset}'.")
+        st.rerun()
 
 conn.close()
 if raw_conn is not conn:
