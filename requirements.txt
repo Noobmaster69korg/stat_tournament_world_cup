@@ -4,3 +4,5 @@ requests
 beautifulsoup4
 html5lib
 lxml
+pypdf
+openpyxl
