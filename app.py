@@ -289,14 +289,35 @@ def build_filtered_connection(raw_conn, t_col, year_range, countries):
 # format's batting/bowling "Global Rankings" CSVs (Player, Year, Wins %,
 # Losses, Ties), and produces one row per auction player with loss-threshold
 # counts and a best-year rank for every format/discipline combination included.
-def parse_auction_pdf_bytes(file_bytes):
-    reader = PdfReader(io.BytesIO(file_bytes))
-    text = "\n".join((p.extract_text() or "") for p in reader.pages)
+_PAGE_FOOTER_RE = re.compile(r"^page\s+\d+\s+of\s+\d+$", re.IGNORECASE)
+
+def parse_auction_order_bytes(file_bytes, filename):
+    """Parses an uploaded auction order file into an ordered list of
+    (order, player_name) tuples. Accepts either a .txt file (read as plain
+    text - most reliable) or a .pdf (text extracted via pypdf).
+
+    PDF text extraction is NOT always reliable: some PDFs (e.g. exported from
+    certain apps, or with embedded/subsetted fonts) don't yield clean,
+    extractable body text via pypdf even though the text is visibly there and
+    selectable - sometimes the only text that comes out is incidental stuff
+    like an auto-inserted page-number footer. If that happens here, uploading
+    a plain .txt file with the same player list (one per line) sidesteps PDF
+    parsing entirely and is much more dependable.
+    """
+    if filename.lower().endswith(".txt"):
+        text = file_bytes.decode("utf-8", errors="replace")
+    else:
+        reader = PdfReader(io.BytesIO(file_bytes))
+        text = "\n".join((p.extract_text() or "") for p in reader.pages)
+
     players = []
     seq = 0
     for line in text.splitlines():
         line = line.strip()
         if not line:
+            continue
+        if _PAGE_FOOTER_RE.match(line):
+            # Common PDF footer artifact ("Page 2 of 3") - never a real player.
             continue
         m = re.match(r"^(\d+)\s+(.+?)\s*$", line)
         if m:
@@ -387,9 +408,9 @@ def _player_loss_stats(matched_name, df, thresholds):
     out['total_n'] = int(all_raw.shape[0])
     return out
 
-def build_auction_sheet(pdf_bytes, formats_config, thresholds):
+def build_auction_sheet(order_bytes, order_filename, formats_config, thresholds):
     """formats_config: {format_name: {'bat': csv_fileobj, 'bowl': csv_fileobj}}"""
-    auction_players = parse_auction_pdf_bytes(pdf_bytes)
+    auction_players = parse_auction_order_bytes(order_bytes, order_filename)
     loaded = {}
     for fmt_name, cfg in formats_config.items():
         for disc in ("bat", "bowl"):
@@ -972,13 +993,18 @@ elif st.session_state.nav_choice == "✏️ Edit Data":
 # --- TAB 8: AUCTION SHEET ---
 elif st.session_state.nav_choice == "🏆 Auction Sheet":
     st.caption(
-        "Upload an auction-order PDF and the Global Rankings CSVs (Player, Year, Wins %, Losses, Ties) "
+        "Upload an auction-order file (PDF or TXT) and the Global Rankings CSVs (Player, Year, Wins %, Losses, Ties) "
         "for whichever formats apply to this tournament. Output is ordered exactly like your auction list, "
         "with separate batting/bowling loss-threshold counts and a best-year rank per format."
     )
+    st.caption(
+        "💡 If the PDF isn't picking up players correctly (e.g. it shows page footers instead of names), "
+        "paste the same list into a plain .txt file (one player per line, numbered or not) and upload that instead — "
+        "it's a lot more reliable than PDF text extraction."
+    )
 
     THRESHOLDS = [5, 10, 20, 30, 40, 50]
-    pdf_file = st.file_uploader("Auction Order PDF", type=["pdf"], key="auction_pdf")
+    pdf_file = st.file_uploader("Auction Order (PDF or TXT)", type=["pdf", "txt"], key="auction_pdf")
 
     formats_config = {}
     for fmt_name in ["Test", "ODI", "T20I"]:
@@ -1000,7 +1026,7 @@ elif st.session_state.nav_choice == "🏆 Auction Sheet":
                 st.error(f"Missing a batting or bowling CSV for: {', '.join(missing)}")
             else:
                 with st.spinner("Matching players and building the sheet..."):
-                    result_df, warnings = build_auction_sheet(pdf_file.read(), formats_config, THRESHOLDS)
+                    result_df, warnings = build_auction_sheet(pdf_file.read(), pdf_file.name, formats_config, THRESHOLDS)
                 st.success(f"Built the sheet for {len(result_df)} players.")
                 if warnings:
                     with st.expander(f"⚠️ {len(warnings)} players need manual review (uncertain name match)"):
