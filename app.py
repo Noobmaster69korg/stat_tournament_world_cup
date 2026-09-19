@@ -220,6 +220,24 @@ def build_pairwise_sql(metrics, alias_a, alias_b, op):
         parts.append(f"(CASE WHEN {alias_a}.{q_col(col)} {cmp} {alias_b}.{q_col(col)} THEN 1 ELSE 0 END)")
     return "(" + " + ".join(parts) + ")"
 
+def build_omit_sql(t_col, omit_set, table, alias=None):
+    """WHERE-clause fragment excluding specific (table, Player, Year) triples
+    from a squad's eligible pool - e.g. a specific bad year the user chose to
+    leave out without dropping the player from the squad entirely. Only
+    triples matching `table` (batting/bowling) apply; alias is the SQL table
+    alias to qualify Player/{t_col} with (None for an unaliased query)."""
+    prefix = f"{alias}." if alias else ""
+    conds = []
+    for tbl, player, year in omit_set:
+        if tbl != table:
+            continue
+        p = str(player).replace("'", "''")
+        y = str(year).replace("'", "''")
+        conds.append(f"({prefix}Player = '{p}' AND {prefix}{t_col} = '{y}')")
+    if not conds:
+        return ""
+    return " AND NOT (" + " OR ".join(conds) + ")"
+
 def compare_rows(row_a, row_b, metrics):
     """Python-side equivalent of build_pairwise_sql, for the Format Analysis loops."""
     wins = 0
@@ -426,13 +444,18 @@ def _load_format_dataframes(formats_config):
             loaded[(fmt_name, disc)] = df
     return loaded
 
-def _auto_match_records(auction_players, loaded):
-    """One automatic name-match attempt per (auction player, format,
-    discipline) cell - the starting point before any manual corrections."""
-    indices = {key: _build_name_index(df['Player']) for key, df in loaded.items()}
+def _build_indices(loaded):
+    """One name-index per (format, discipline) sheet, built once and reused
+    both for the initial automatic match and for cross-sheet propagation."""
+    return {key: _build_name_index(df['Player']) for key, df in loaded.items()}
+
+def _auto_match_records(auction_players, indices):
+    """One independent automatic name-match attempt per (auction player,
+    format, discipline) cell - the starting point before cross-sheet
+    propagation or any manual corrections."""
     records = {}
     for order, name in auction_players:
-        for fmt_name, disc in loaded:
+        for fmt_name, disc in indices:
             matched, status = _match_player(name, indices[(fmt_name, disc)])
             records[(order, fmt_name, disc)] = {
                 "order": order, "auction_player": name,
@@ -441,55 +464,107 @@ def _auto_match_records(auction_players, loaded):
             }
     return records
 
-def _resolve_match(order, fmt_name, disc, auto_records, overrides):
-    """The EFFECTIVE match for a cell: a manual override if the user set one,
-    otherwise the automatic match. Returns (matched_name_or_None, status)."""
-    key = (order, fmt_name, disc)
-    if key in overrides:
-        chosen = overrides[key]
-        if chosen == AUCTION_EXCLUDE:
-            return None, "manually_excluded"
-        return chosen, "manual"
-    rec = auto_records[key]
-    return rec["matched_name"], rec["status"]
+def _core_surname(matched_name):
+    """Surname of a matched CSV player string, ignoring the trailing country code."""
+    tokens = str(matched_name).split()
+    core = " ".join(tokens[:-1]) if len(tokens) > 1 else matched_name
+    parsed = _split_name(core)
+    return parsed[0] if parsed else None
 
-def _resolve_all(auction_players, format_names, auto_records, overrides):
-    """Resolves every (auction player, format, discipline) cell, and tallies
-    - per auction player - how many of those cells resolved to a genuinely
-    identified player (an exact match, or a manually confirmed one)."""
+def _resolve_all(auction_players, format_names, indices, auto_records, overrides):
+    """Resolves every (auction player, format, discipline) cell to its
+    effective match, then propagates identity across sheets for the same
+    player: once a player is confidently identified (an exact automatic
+    match, or a manual correction) in ANY one format/discipline, that same
+    surname is used to resolve them in every OTHER sheet too - rather than
+    treating each sheet's match as fully independent. This matters because
+    the same real player can come out as an 'exact' match in one sheet but
+    only 'weak'/'ambiguous' in another purely due to how that sheet's CSV
+    happened to write their name (e.g. one scrape uses full initials, another
+    a single initial) - country suffix differences are already ignored by
+    the surname/initials matching itself, this handles initials-formatting
+    differences across separately-scraped sheets.
+
+    A cell only gets upgraded this way if the confirmed surname is UNIQUE
+    within that other sheet too - if two different players share that surname
+    there, we can't safely disambiguate and it's left for manual review.
+    Manual overrides (including an explicit 'exclude') are never touched by
+    propagation.
+
+    Returns (resolved, confirmed_counts):
+      resolved: {(order, fmt, disc): (matched_name_or_None, status)}
+        status one of: 'exact', 'manual', 'manually_excluded',
+        'cross_confirmed', 'weak', 'ambiguous', 'no_match'
+      confirmed_counts: {order: count of cells resolved with real confidence}
+    """
     resolved = {}
-    confirmed_counts = {}
     for order, name in auction_players:
-        confirmed_counts.setdefault(order, 0)
         for fmt_name in format_names:
             for disc in ("bat", "bowl"):
-                matched, status = _resolve_match(order, fmt_name, disc, auto_records, overrides)
-                resolved[(order, fmt_name, disc)] = (matched, status)
+                key = (order, fmt_name, disc)
+                if key in overrides:
+                    chosen = overrides[key]
+                    resolved[key] = (None, "manually_excluded") if chosen == AUCTION_EXCLUDE else (chosen, "manual")
+                else:
+                    rec = auto_records[key]
+                    resolved[key] = (rec["matched_name"], rec["status"])
+
+    # Cross-sheet propagation.
+    for order, name in auction_players:
+        confirmed_surnames = []
+        for fmt_name in format_names:
+            for disc in ("bat", "bowl"):
+                matched, status = resolved[(order, fmt_name, disc)]
+                if status in ("exact", "manual") and matched:
+                    surname = _core_surname(matched)
+                    if surname:
+                        confirmed_surnames.append(surname)
+        if not confirmed_surnames:
+            continue
+        surname = max(set(confirmed_surnames), key=confirmed_surnames.count)
+        for fmt_name in format_names:
+            for disc in ("bat", "bowl"):
+                key = (order, fmt_name, disc)
+                if key in overrides:
+                    continue  # never override an explicit user choice
+                matched, status = resolved[key]
                 if status in ("exact", "manual"):
-                    confirmed_counts[order] += 1
+                    continue  # already confident on its own terms
+                by_surname = indices[(fmt_name, disc)][2]
+                cands = by_surname.get(surname, [])
+                if len(cands) == 1:
+                    resolved[key] = (cands[0], "cross_confirmed")
+
+    confirmed_counts = {}
+    for order, name in auction_players:
+        confirmed_counts[order] = sum(
+            1 for fmt_name in format_names for disc in ("bat", "bowl")
+            if resolved[(order, fmt_name, disc)][1] in ("exact", "manual", "cross_confirmed")
+        )
     return resolved, confirmed_counts
 
 def _needs_review(status, order, confirmed_counts):
     """Whether a cell's match is worth flagging for a human to check.
     - Ambiguous/weak matches always are: there IS a row there, just an
-      uncertain one.
+      uncertain one, and cross-sheet propagation (see _resolve_all) couldn't
+      resolve it either.
     - A 'no match found' is only worth flagging if this player wasn't
       identified in ANY format/discipline at all. If they were found
       elsewhere, a no-match here almost always just means they have no
       eligible years/appearances in that particular format or discipline
       (e.g. a specialist batter absent from the bowling sheet) - not a
-      real data problem."""
+      real data problem.
+    - 'cross_confirmed' (and 'exact'/'manual') never need review - that's
+      the whole point: a confident match anywhere resolves it everywhere."""
     if status in ("weak", "ambiguous"):
         return True
     if status == "no_match":
         return confirmed_counts.get(order, 0) == 0
     return False
 
-def build_auction_sheet_df(auction_players, format_names, loaded, auto_records, overrides, thresholds):
-    """Builds the result DataFrame + a list of human-readable warning strings,
-    applying any manual corrections (overrides) on top of the automatic
-    name matches."""
-    resolved, confirmed_counts = _resolve_all(auction_players, format_names, auto_records, overrides)
+def build_auction_sheet_df(auction_players, format_names, loaded, resolved, confirmed_counts, thresholds):
+    """Builds the result DataFrame + a list of human-readable warning strings
+    from an already-resolved match set (see _resolve_all)."""
     rows, warnings = [], []
     for order, name in auction_players:
         row = {"Auction Order": order, "Auction Player": name}
@@ -516,6 +591,8 @@ def build_auction_sheet_df(auction_players, format_names, loaded, auto_records, 
                     notes.append(f"{prefix}: manually corrected to '{matched}'")
                 elif status == "manually_excluded":
                     notes.append(f"{prefix}: manually excluded (no match)")
+                elif status == "cross_confirmed":
+                    notes.append(f"{prefix}: matched '{matched}' (confirmed via another format)")
                 elif status == "no_match":
                     if _needs_review(status, order, confirmed_counts):
                         notes.append(f"{prefix}: no match found, please verify")
@@ -729,6 +806,8 @@ if password != "qcc_stat_tourno":
 # --- 6. NAV & STATE ---
 if "nav_choice" not in st.session_state: st.session_state.nav_choice = "Batting Milestones"
 if "squad_a" not in st.session_state: st.session_state.squad_a, st.session_state.squad_b = [], []
+if "squad_a_omit" not in st.session_state: st.session_state.squad_a_omit = set()
+if "squad_b_omit" not in st.session_state: st.session_state.squad_b_omit = set()
 if "bat_metrics" not in st.session_state: st.session_state.bat_metrics = DEFAULT_BAT_METRICS.copy()
 if "bowl_metrics" not in st.session_state: st.session_state.bowl_metrics = DEFAULT_BOWL_METRICS.copy()
 
@@ -929,15 +1008,45 @@ elif st.session_state.nav_choice == "🏟️ Squad Comparison":
         n = st.selectbox("Add to B", [""] + all_p, key="sqb"); (st.session_state.squad_b.append(n), st.rerun()) if n and n not in st.session_state.squad_b else None
         st.session_state.squad_b = st.multiselect("Squad B", st.session_state.squad_b, default=st.session_state.squad_b)
 
+    with st.expander("🚫 Omit Specific Player-Years"):
+        st.caption(
+            "Exclude individual player-years from a squad's eligible pool without dropping the player "
+            "entirely - e.g. leave Amla's 2010 batting year out of Squad A while keeping his other years."
+        )
+        for squad_label, squad_list, omit_key in [
+            ("Squad A", st.session_state.squad_a, "squad_a_omit"),
+            ("Squad B", st.session_state.squad_b, "squad_b_omit"),
+        ]:
+            st.markdown(f"**{squad_label}**")
+            if not squad_list:
+                st.caption("No players in this squad yet.")
+                continue
+            option_map = {}
+            for table, disc_label in [("batting", "Batting"), ("bowling", "Bowling")]:
+                l = "('" + "','".join(squad_list) + "')"
+                py_df = pd.read_sql(f"SELECT Player, {t_col} as Year FROM {table} WHERE Player IN {l}", conn)
+                for _, r in py_df.iterrows():
+                    label = f"{r['Player']} — {r['Year']} ({disc_label})"
+                    option_map[label] = (table, r['Player'], r['Year'])
+            current_labels = [lbl for lbl, val in option_map.items() if val in st.session_state[omit_key]]
+            chosen = st.multiselect(
+                f"Years to omit from {squad_label}", sorted(option_map.keys()),
+                default=current_labels, key=f"{omit_key}_select",
+            )
+            st.session_state[omit_key] = {option_map[c] for c in chosen}
+
     if st.session_state.squad_a and st.session_state.squad_b:
         sub = st.radio("Mode:", ["Individual Benchmark", "Squad Pairwise"], horizontal=True)
         if sub == "Individual Benchmark":
             d_dir = st.radio("Direction:", ["Squad A ➡️ B", "Squad B ➡️ A"], horizontal=True)
             src, trg = (st.session_state.squad_a, st.session_state.squad_b) if "A ➡️" in d_dir else (st.session_state.squad_b, st.session_state.squad_a)
+            src_omit, trg_omit = (st.session_state.squad_a_omit, st.session_state.squad_b_omit) if "A ➡️" in d_dir else (st.session_state.squad_b_omit, st.session_state.squad_a_omit)
             p = st.selectbox("Pick Benchmark Player:", src, key=f"sq_p_sel_{d_dir}_{len(src)}")
             if p:
-                b_y = pd.read_sql(f"SELECT {t_col} as Year FROM batting WHERE Player='{p}'", conn)['Year'].tolist()
-                w_y = pd.read_sql(f"SELECT {t_col} as Year FROM bowling WHERE Player='{p}'", conn)['Year'].tolist()
+                b_y_all = pd.read_sql(f"SELECT {t_col} as Year FROM batting WHERE Player='{p}'", conn)['Year'].tolist()
+                w_y_all = pd.read_sql(f"SELECT {t_col} as Year FROM bowling WHERE Player='{p}'", conn)['Year'].tolist()
+                b_y = [y for y in b_y_all if ("batting", p, y) not in src_omit]
+                w_y = [y for y in w_y_all if ("bowling", p, y) not in src_omit]
                 disc = st.radio("Type:", (["Batting"] if b_y else []) + (["Bowling"] if w_y else []), horizontal=True)
                 y = st.selectbox("Year:", b_y if disc == "Batting" else w_y)
                 if y:
@@ -952,6 +1061,7 @@ elif st.session_state.nav_choice == "🏟️ Squad Comparison":
                         met_cols[i].metric(m['col'], val)
                         thresholds.append(val)
                     target_str = "('" + "','".join(trg) + "')"
+                    target_omit_sql = build_omit_sql(t_col, trg_omit, table)
                     select_cols = ", ".join(q_col(m['col']) for m in metrics)
                     wins_a = build_case_sql(metrics, thresholds, 'win')
                     ties_a = build_case_sql(metrics, thresholds, 'tie')
@@ -959,7 +1069,7 @@ elif st.session_state.nav_choice == "🏟️ Squad Comparison":
                     q = f"""
                         SELECT Player, {t_col} as Year, {select_cols},
                                ({wins_a}) as WinsA, ({ties_a}) as TiesA, ({losses_a}) as LossesA
-                        FROM {table} WHERE Player IN {target_str}
+                        FROM {table} WHERE Player IN {target_str} {target_omit_sql}
                         ORDER BY WinsA DESC
                     """
                     display_styled_results(pd.read_sql(q, conn), f"Against {p}")
@@ -968,12 +1078,16 @@ elif st.session_state.nav_choice == "🏟️ Squad Comparison":
             metrics = st.session_state.bat_metrics if t_disc == "batting" else st.session_state.bowl_metrics
             a_l = "('" + "','".join(st.session_state.squad_a) + "')"
             b_l = "('" + "','".join(st.session_state.squad_b) + "')"
+            omit_a_outer = build_omit_sql(t_col, st.session_state.squad_a_omit, t_disc, alias="A")
+            omit_b_outer = build_omit_sql(t_col, st.session_state.squad_b_omit, t_disc, alias="A")
+            omit_a_inner = build_omit_sql(t_col, st.session_state.squad_a_omit, t_disc, alias="B")
+            omit_b_inner = build_omit_sql(t_col, st.session_state.squad_b_omit, t_disc, alias="B")
             win = build_pairwise_sql(metrics, "A", "B", "win")
             loss = build_pairwise_sql(metrics, "A", "B", "loss")
             c1, c2 = st.columns(2)
             with c1:
                 st.write("Squad A vs B")
-                q_a = f"SELECT A.Player, A.{t_col} as Year, (SELECT COUNT(*) FROM {t_disc} B WHERE B.Player IN {b_l}) as TR, (SELECT COUNT(*) FROM {t_disc} B WHERE B.Player IN {b_l} AND {win} >= 2) as WC, (SELECT COUNT(*) FROM {t_disc} B WHERE B.Player IN {b_l} AND {loss} >= 2) as LC FROM {t_disc} A WHERE A.Player IN {a_l}"
+                q_a = f"SELECT A.Player, A.{t_col} as Year, (SELECT COUNT(*) FROM {t_disc} B WHERE B.Player IN {b_l} {omit_b_inner}) as TR, (SELECT COUNT(*) FROM {t_disc} B WHERE B.Player IN {b_l} {omit_b_inner} AND {win} >= 2) as WC, (SELECT COUNT(*) FROM {t_disc} B WHERE B.Player IN {b_l} {omit_b_inner} AND {loss} >= 2) as LC FROM {t_disc} A WHERE A.Player IN {a_l} {omit_a_outer}"
                 df_a = pd.read_sql(q_a, conn)
                 df_a['Wins'] = df_a['WC']
                 df_a['Win %'] = df_a.apply(lambda r: pct(r['WC'], r['TR']), axis=1)
@@ -984,7 +1098,7 @@ elif st.session_state.nav_choice == "🏟️ Squad Comparison":
                 st.dataframe(df_a[['Player', 'Year', 'Wins', 'Win %', 'Losses', 'Loss %', 'Ties', 'Tie %']], hide_index=True)
             with c2:
                 st.write("Squad B vs A")
-                q_b = f"SELECT A.Player, A.{t_col} as Year, (SELECT COUNT(*) FROM {t_disc} B WHERE B.Player IN {a_l}) as TR, (SELECT COUNT(*) FROM {t_disc} B WHERE B.Player IN {a_l} AND {win} >= 2) as WC, (SELECT COUNT(*) FROM {t_disc} B WHERE B.Player IN {a_l} AND {loss} >= 2) as LC FROM {t_disc} A WHERE A.Player IN {b_l}"
+                q_b = f"SELECT A.Player, A.{t_col} as Year, (SELECT COUNT(*) FROM {t_disc} B WHERE B.Player IN {a_l} {omit_a_inner}) as TR, (SELECT COUNT(*) FROM {t_disc} B WHERE B.Player IN {a_l} {omit_a_inner} AND {win} >= 2) as WC, (SELECT COUNT(*) FROM {t_disc} B WHERE B.Player IN {a_l} {omit_a_inner} AND {loss} >= 2) as LC FROM {t_disc} A WHERE A.Player IN {b_l} {omit_b_outer}"
                 df_b = pd.read_sql(q_b, conn)
                 df_b['Wins'] = df_b['WC']
                 df_b['Win %'] = df_b.apply(lambda r: pct(r['WC'], r['TR']), axis=1)
@@ -1108,13 +1222,15 @@ elif st.session_state.nav_choice == "🏆 Auction Sheet":
                 with st.spinner("Matching players and building the sheet..."):
                     auction_players = parse_auction_order_bytes(pdf_file.read(), pdf_file.name)
                     loaded = _load_format_dataframes(formats_config)
-                    auto_records = _auto_match_records(auction_players, loaded)
+                    indices = _build_indices(loaded)
+                    auto_records = _auto_match_records(auction_players, indices)
                 # Stashed in session_state so the manual-correction controls below
                 # can rebuild the sheet on every tweak without needing the original
                 # file uploads to still be present, and survive the reruns that
                 # each correction dropdown triggers.
                 st.session_state.auction_players = auction_players
                 st.session_state.auction_loaded = loaded
+                st.session_state.auction_indices = indices
                 st.session_state.auction_auto_records = auto_records
                 st.session_state.auction_format_names = list(formats_config.keys())
                 st.session_state.auction_thresholds = THRESHOLDS
@@ -1123,18 +1239,20 @@ elif st.session_state.nav_choice == "🏆 Auction Sheet":
     if st.session_state.get("auction_players"):
         auction_players = st.session_state.auction_players
         loaded = st.session_state.auction_loaded
+        indices = st.session_state.auction_indices
         auto_records = st.session_state.auction_auto_records
         format_names = st.session_state.auction_format_names
         thresholds = st.session_state.auction_thresholds
         overrides = st.session_state.setdefault("auction_overrides", {})
 
-        # Cells worth showing a corrector for: ambiguous/weak matches always,
-        # plus any "no match found" case where this player wasn't identified
-        # in ANY format/discipline (see _needs_review for why a no-match
+        # Cells worth showing a corrector for: ambiguous/weak matches that
+        # cross-sheet propagation couldn't resolve either, plus any "no match
+        # found" case where this player wasn't identified in ANY
+        # format/discipline (see _needs_review for why a no-match
         # elsewhere-confirmed player is skipped).
-        resolved_snapshot, confirmed_counts = _resolve_all(auction_players, format_names, auto_records, overrides)
+        resolved, confirmed_counts = _resolve_all(auction_players, format_names, indices, auto_records, overrides)
         flagged_keys = sorted(
-            key for key, (matched, status) in resolved_snapshot.items()
+            key for key, (matched, status) in resolved.items()
             if _needs_review(status, key[0], confirmed_counts)
         )
 
@@ -1178,19 +1296,27 @@ elif st.session_state.nav_choice == "🏆 Auction Sheet":
                     st.session_state.auction_overrides = {}
                     st.rerun()
 
-        result_df, warnings = build_auction_sheet_df(auction_players, format_names, loaded, auto_records, overrides, thresholds)
+        result_df, warnings = build_auction_sheet_df(auction_players, format_names, loaded, resolved, confirmed_counts, thresholds)
         st.success(f"Built the sheet for {len(result_df)} players" + (f" ({len(overrides)} manually corrected)." if overrides else "."))
+
+        locked_cols = ["Auction Order", "Auction Player"]
+        optional_cols = [c for c in result_df.columns if c not in locked_cols]
+        selected_cols = st.multiselect(
+            "Columns to include (Auction Order & Auction Player are always included)",
+            optional_cols, default=optional_cols, key="auction_col_select",
+        )
+        output_df = result_df[locked_cols + [c for c in optional_cols if c in selected_cols]]
 
         buf = io.BytesIO()
         with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-            result_df.to_excel(writer, index=False, sheet_name="Auction Sheet")
+            output_df.to_excel(writer, index=False, sheet_name="Auction Sheet")
             ws = writer.sheets["Auction Sheet"]
             from openpyxl.styles import Font, PatternFill, Alignment
             from openpyxl.utils import get_column_letter
             header_font = Font(name="Arial", bold=True, color="FFFFFF")
             header_fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
             body_font = Font(name="Arial", size=10)
-            for col_idx, col_name in enumerate(result_df.columns, start=1):
+            for col_idx, col_name in enumerate(output_df.columns, start=1):
                 cell = ws.cell(row=1, column=col_idx)
                 cell.font = header_font
                 cell.fill = header_fill
@@ -1208,7 +1334,7 @@ elif st.session_state.nav_choice == "🏆 Auction Sheet":
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key="auction_download",
         )
-        st.dataframe(result_df, use_container_width=True, hide_index=True)
+        st.dataframe(output_df, use_container_width=True, hide_index=True)
 
 conn.close()
 if raw_conn is not conn:
